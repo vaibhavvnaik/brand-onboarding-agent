@@ -187,6 +187,7 @@ function logDiscoveryRuntimeConfig() {
     // Body parsing
     app.use(express.json({ limit: '10mb' }));
     app.use(express.urlencoded({ extended: true }));
+    app.use('/artifacts', express.static(path.join(__dirname, 'artifacts'), { maxAge: '7d' }));
 
     // Session (in-memory store - safe when MongoDB is unavailable)
     app.use(session({

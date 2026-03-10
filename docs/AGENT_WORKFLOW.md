@@ -86,6 +86,7 @@ This means cowork/manual signups are automatically regularized into the same dow
 ## Where Artifacts and Logs Live
 
 - Newsletter screenshots: `artifacts/newsletters/` (local filesystem of running service).
+- Brand logos: `artifacts/logos/` (auto-fetched from brand website metadata/assets).
 - Runtime logs: console + `logs/agent.log`.
 - Persistent activity logs (Mongo): `activitylogs` collection (30-day TTL).
 - Workflow step history (Mongo): `workflowruns` collection.
@@ -119,6 +120,14 @@ This means cowork/manual signups are automatically regularized into the same dow
 - API: `GET /api/activity/workflow-runs?limit=120`
 - API: `GET /api/activity/logs?limit=200` (look for `phase=scheduler`)
 - Railway logs: lines starting with `[scheduler]`.
+
+## Logo Enrichment
+
+- On onboarding, if a brand has no `logoUrl`, agent attempts non-LLM logo discovery from website HTML:
+  - `og:logo`, `og:image`, `twitter:image`, icon links, logo-like image elements, JSON-LD logo.
+- Candidate logo is downloaded and stored in `artifacts/logos/` and saved to `brand.logoUrl` as `/artifacts/logos/...`.
+- Bulk backfill endpoint:
+  - `POST /api/brands/logo-backfill` with optional body `{ "limit": 100, "force": false }`
 
 ## Claude Discovery Runtime Notes
 

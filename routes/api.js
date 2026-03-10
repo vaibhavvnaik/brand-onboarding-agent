@@ -11,6 +11,7 @@ const EmailMessage = require('../models/EmailMessage');
 const { requireApiAuth } = require('../middleware/auth');
 const { run } = require('../agents/brandOnboardingAgent');
 const { fillDiscoveryPool, getDiscoveryPoolStats } = require('../services/brandDiscovery');
+const { ensureBrandLogo } = require('../services/brandLogo');
 const { scanRecentEmails } = require('../services/emailChangeDetector');
 const { processInbox } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
@@ -605,6 +606,47 @@ router.patch('/brands/:id', async (req, res) => {
     if (!brand) return res.status(404).json({ error: 'Brand not found' });
     res.json(brand);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/brands/logo-backfill', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.body?.limit || 100), 1000);
+    const force = String(req.body?.force || 'false').toLowerCase() === 'true';
+    const query = force ? {} : { $or: [{ logoUrl: { $exists: false } }, { logoUrl: null }, { logoUrl: '' }] };
+
+    const brands = await Brand.find(query)
+      .sort({ updatedAt: -1 })
+      .limit(limit)
+      .select('name domain websiteUrl logoUrl')
+      .lean();
+
+    let updated = 0;
+    let skipped = 0;
+    const rows = [];
+
+    for (const brand of brands) {
+      const logo = await ensureBrandLogo({
+        websiteUrl: brand.websiteUrl,
+        domain: brand.domain,
+        name: brand.name,
+        currentLogoUrl: brand.logoUrl
+      }, { force });
+
+      if (logo?.ok && logo.logoUrl && logo.logoUrl !== brand.logoUrl) {
+        await Brand.updateOne({ _id: brand._id }, { $set: { logoUrl: logo.logoUrl } });
+        updated += 1;
+        rows.push({ brand: brand.name, domain: brand.domain, logoUrl: logo.logoUrl, status: 'updated' });
+      } else {
+        skipped += 1;
+        rows.push({ brand: brand.name, domain: brand.domain, logoUrl: brand.logoUrl || null, status: 'skipped' });
+      }
+    }
+
+    return res.json({ processed: brands.length, updated, skipped, rows });
+  } catch (err) {
+    logger.error('Logo backfill failed', err);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 router.delete('/brands/:id', async (req, res) => {

@@ -6,6 +6,7 @@ const Brand = require('../models/Brand');
 const { discoverBrands } = require('../services/brandDiscovery');
 const { signUpForNewsletter } = require('../services/newsletterSignup');
 const { categorizeBrand, categorizeBrands } = require('../services/brandCategorizer');
+const { ensureBrandLogo } = require('../services/brandLogo');
 const { filterDuplicates } = require('../services/duplicateChecker');
 const { scanRecentEmails, detectStaleBrands } = require('../services/emailChangeDetector');
 const { classifySignupFailure } = require('../utils/signupFailure');
@@ -125,6 +126,24 @@ async function runFullOnboarding(batchSize, emit, getStopFlag) {
     } else {
       brandDoc.onboardingStatus = 'subscribing';
     }
+
+    if (!brandDoc.logoUrl) {
+      try {
+        const logo = await ensureBrandLogo({
+          websiteUrl: brandDoc.websiteUrl,
+          domain: brandDoc.domain,
+          name: brandDoc.name,
+          currentLogoUrl: brandDoc.logoUrl
+        });
+        if (logo?.ok && logo.logoUrl) {
+          brandDoc.logoUrl = logo.logoUrl;
+          emit('info', 'metadata', `    ${brand.name}: logo captured`);
+        }
+      } catch (err) {
+        logger.debug(`[metadata] logo capture skipped for ${brand.name}: ${err.message}`);
+      }
+    }
+
     await brandDoc.save();
     const signupResult = await signUpForNewsletter(brand.websiteUrl, brand.name);
     brandDoc.signupAttempts      = (brandDoc.signupAttempts || 0) + 1;

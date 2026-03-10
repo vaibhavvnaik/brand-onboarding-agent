@@ -2,4 +2,5 @@ node_modules
 .local-debs
 .local-libs
 artifacts/newsletters
+artifacts/logos
 .env
