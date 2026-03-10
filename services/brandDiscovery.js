@@ -157,7 +157,8 @@ async function fillDiscoveryPool({
   targetSize = 1000,
   existingDomains = new Set(),
   maxCalls = 8,
-  chunkSize = 100
+  chunkSize = 12,
+  highQualityOnly = true
 } = {}) {
   const safeTarget = Math.max(50, Math.min(3000, Number(targetSize || 1000)));
   const safeCalls = Math.max(1, Math.min(20, Number(maxCalls || 8)));
@@ -171,7 +172,10 @@ async function fillDiscoveryPool({
     const { available } = await getDiscoveryPoolStats(existingDomains);
     if (available >= safeTarget) break;
     const needed = Math.min(safeChunk, safeTarget - available);
-    const batch = await discoverBrandsWithClaude(needed, generationExclude, { useHistoryFilter: false });
+    const batch = await discoverBrandsWithClaude(needed, generationExclude, {
+      useHistoryFilter: false,
+      highQualityOnly
+    });
     calls += 1;
     generated += batch.length;
     if (!batch.length) break;
@@ -193,6 +197,7 @@ async function discoverBrandsWithClaude(limit, existingDomains = new Set(), opti
 
   const requestedLimit = Math.max(1, Math.min(12, parseInt(limit || 1, 10)));
   const useHistoryFilter = options.useHistoryFilter !== false;
+  const highQualityOnly = options.highQualityOnly !== false;
   const history = useHistoryFilter ? (await Config.get('claude_discovery_domains').catch(() => []) || []) : [];
   const blocked = new Set([
     ...Array.from(existingDomains || []).map((d) => normalizeDomain(d)),
@@ -212,6 +217,10 @@ Rules:
 - exclude marketplaces/publishers/software tools
 - reason max 6 words
 - keep values short and concise
+- prioritize highest quality D2C brands first
+- prefer premium, luxury, or established brands
+- avoid low-quality / dropship-style brands
+- ${highQualityOnly ? 'if uncertain, return only premium/luxury/established tiers' : 'allow mixed tiers when needed'}
 - do not include these domains: ${avoidList.join(', ') || '(none)'}
 `;
 
@@ -233,14 +242,17 @@ Rules:
     if (!Array.isArray(arr)) return [];
 
     const seen = new Set();
+    const allowedTiers = highQualityOnly ? new Set(['premium', 'luxury', 'established']) : null;
     for (const item of arr) {
       const name = String(item?.name || '').trim();
       const domain = normalizeDomain(item?.domain || item?.websiteUrl || '');
+      const tier = String(item?.brandTier || 'established').trim().toLowerCase();
       if (!name || !domain) continue;
       if (blocked.has(domain) || seen.has(domain)) continue;
+      if (allowedTiers && !allowedTiers.has(tier)) continue;
       seen.add(domain);
       const websiteUrl = item?.websiteUrl ? String(item.websiteUrl).trim() : `https://www.${domain}`;
-      const { quality, affiliate } = tierToScore(item?.brandTier);
+      const { quality, affiliate } = tierToScore(tier);
       results.push({
         name,
         domain,
@@ -249,7 +261,7 @@ Rules:
         source: 'claude_ai',
         sourceUrl: 'claude://brand-discovery',
         primaryCategory: String(item?.primaryCategory || 'Other').trim(),
-        tier: String(item?.brandTier || 'established').trim().toLowerCase(),
+        tier,
         qualityScore: quality,
         affiliatePotentialScore: affiliate
       });
@@ -530,8 +542,11 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   const strictClaude = String(process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
   const poolEnabled = envFlag('DISCOVERY_POOL_ENABLED', true);
   const poolTargetSize = Math.max(100, parseInt(process.env.DISCOVERY_POOL_TARGET_SIZE || '1000', 10));
-  const poolFillChunkSize = Math.max(10, parseInt(process.env.DISCOVERY_POOL_FILL_BATCH || '100', 10));
+  const poolFillChunkSize = Math.max(10, parseInt(process.env.DISCOVERY_POOL_FILL_BATCH || '12', 10));
   const poolMaxCallsPerRun = Math.max(1, parseInt(process.env.DISCOVERY_POOL_MAX_CALLS_PER_RUN || '3', 10));
+  const poolRefillOnExhaust = envFlag('DISCOVERY_POOL_REFILL_ON_EXHAUST', true);
+  const poolRefillBurstMaxCalls = Math.max(1, parseInt(process.env.DISCOVERY_POOL_REFILL_BURST_MAX_CALLS || '120', 10));
+  const poolHighQualityOnly = envFlag('DISCOVERY_POOL_HIGH_QUALITY_ONLY', true);
   const enableMilled = envFlag('DISCOVERY_ENABLE_MILLED', false);
   const milledMaxQueries = Math.max(1, parseInt(process.env.DISCOVERY_MILLED_MAX_QUERIES || '15', 10));
   const milledStopOn403 = envFlag('DISCOVERY_MILLED_STOP_ON_403', true);
@@ -544,13 +559,25 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
       logger.warn('[discovery] ANTHROPIC_API_KEY missing; using fallback discovery sources');
     }
     if (poolEnabled && hasClaudeKey) {
+      const initialPoolStats = await getDiscoveryPoolStats(existingDomains);
+      const needsExhaustRefill = poolRefillOnExhaust && initialPoolStats.available < limit;
+      const refillTarget = needsExhaustRefill
+        ? Math.max(poolTargetSize, initialPoolStats.available + 1000)
+        : poolTargetSize;
+      const neededForTarget = Math.max(0, refillTarget - initialPoolStats.available);
+      const computedCalls = neededForTarget > 0 ? Math.ceil(neededForTarget / poolFillChunkSize) : 0;
+      const maxCalls = needsExhaustRefill
+        ? Math.min(poolRefillBurstMaxCalls, Math.max(poolMaxCallsPerRun, computedCalls))
+        : poolMaxCallsPerRun;
+
       const fillStats = await fillDiscoveryPool({
-        targetSize: poolTargetSize,
+        targetSize: refillTarget,
         existingDomains,
-        maxCalls: poolMaxCallsPerRun,
-        chunkSize: poolFillChunkSize
+        maxCalls,
+        chunkSize: poolFillChunkSize,
+        highQualityOnly: poolHighQualityOnly
       });
-      logger.info(`[discovery_pool] queued=${fillStats.queued} available=${fillStats.available} target=${fillStats.targetSize} calls=${fillStats.calls} generated=${fillStats.generated}`);
+      logger.info(`[discovery_pool] queued=${fillStats.queued} available=${fillStats.available} target=${fillStats.targetSize} calls=${fillStats.calls} generated=${fillStats.generated} exhaust_refill=${needsExhaustRefill}`);
 
       const pooled = await fetchFromDiscoveryPool(limit, existingDomains);
       for (const brand of pooled) {
@@ -562,7 +589,10 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
 
     if (discovered.size < limit) {
       const missing = limit - discovered.size;
-      const claudeBrands = await discoverBrandsWithClaude(missing, existingDomains, { useHistoryFilter: true });
+      const claudeBrands = await discoverBrandsWithClaude(missing, existingDomains, {
+        useHistoryFilter: true,
+        highQualityOnly: poolHighQualityOnly
+      });
       for (const brand of claudeBrands) {
         const cleanDomain = normalizeDomain(brand.domain);
         if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;

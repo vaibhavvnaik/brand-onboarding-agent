@@ -137,6 +137,11 @@ This means cowork/manual signups are automatically regularized into the same dow
   - `DISCOVERY_POOL_TARGET_SIZE=1000`
   - `DISCOVERY_POOL_FILL_BATCH=12`
   - `DISCOVERY_POOL_MAX_CALLS_PER_RUN=3`
+  - `DISCOVERY_POOL_REFILL_ON_EXHAUST=true`
+  - `DISCOVERY_POOL_REFILL_BURST_MAX_CALLS=120`
+  - `DISCOVERY_POOL_HIGH_QUALITY_ONLY=true`
+- Exhaust behavior: if available pool drops below current run `batchSize`, agent triggers a burst refill aiming to add the next ~1000 candidates before continuing.
+- Quality behavior: pool refill prompts prioritize premium/luxury/established brands first.
 - API endpoints:
   - `GET /api/discovery/pool/stats`
   - `POST /api/discovery/pool/fill` (body: `targetSize`, `maxCalls`, `chunkSize`)
