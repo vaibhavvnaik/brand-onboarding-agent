@@ -42,6 +42,50 @@ function extractMeaningfulLinkDomains(links = []) {
   return Array.from(domains);
 }
 
+function inferNewsletterLikeType(parsed, detectedType, brand) {
+  const currentType = String(detectedType || 'unknown');
+  if (['newsletter', 'welcome', 'confirmation', 'transactional'].includes(currentType)) return currentType;
+
+  const onboardingStatus = String(brand?.onboardingStatus || '');
+  const shouldAttemptInference = ['awaiting_confirmation', 'subscribing', 'submitted', 'discovered', 'failed', 'captcha_blocked'].includes(onboardingStatus);
+  if (!shouldAttemptInference) return currentType;
+
+  const subject = String(parsed?.subject || '').toLowerCase();
+  const body = String(parsed?.bodyText || parsed?.bodyHtml || '').toLowerCase().slice(0, 4000);
+  const links = Array.isArray(parsed?.links) ? parsed.links : [];
+  const combined = `${subject} ${body}`;
+
+  const strongNewsletterSignals = [
+    'unsubscribe',
+    'manage preferences',
+    'email preferences',
+    'view in browser',
+    'why did i get this email',
+    'you received this email',
+    'update your preferences'
+  ];
+  const mediumSignals = [
+    'new arrivals',
+    'just dropped',
+    'shop now',
+    'shop the',
+    'read more',
+    'latest',
+    'collection',
+    'lookbook',
+    'this week'
+  ];
+
+  const hasStrongSignal = strongNewsletterSignals.some((signal) => combined.includes(signal));
+  const mediumSignalHits = mediumSignals.filter((signal) => combined.includes(signal)).length;
+  const meaningfulLinkCount = links.filter((url) => /^https?:\/\//i.test(String(url))).length;
+
+  if (hasStrongSignal && meaningfulLinkCount >= 1) return 'newsletter';
+  if (mediumSignalHits >= 2 && meaningfulLinkCount >= 2) return 'newsletter';
+  if (meaningfulLinkCount >= 5 && combined.includes('unsubscribe')) return 'newsletter';
+  return currentType;
+}
+
 async function resolveBrand(senderEmail, senderDomain, links = []) {
   if (!senderEmail && !senderDomain) return null;
 
@@ -180,6 +224,11 @@ async function processSingleMessage(messageId) {
     return { matched: false, emailType };
   }
 
+  const effectiveEmailType = inferNewsletterLikeType(parsed, emailType, brand);
+  if (effectiveEmailType !== emailType) {
+    emailMessage.emailType = effectiveEmailType;
+  }
+
   emailMessage.brandId = brand._id;
   emailMessage.state = 'brand_resolved';
   emailMessage.processedBy.identity_resolver = {
@@ -193,7 +242,7 @@ async function processSingleMessage(messageId) {
   };
 
   // Only newsletter emails define the "true" sender identity for a brand.
-  if (emailType === 'newsletter' &&
+  if (effectiveEmailType === 'newsletter' &&
       senderEmail &&
       (!brand.currentSenderEmail || brand.currentSenderEmail.toLowerCase() !== senderEmail.toLowerCase())) {
     await brand.recordSenderChange(senderEmail);
@@ -211,7 +260,7 @@ async function processSingleMessage(messageId) {
   brand.isStale = false;
   brand.totalEmailsReceived = (brand.totalEmailsReceived || 0) + 1;
 
-  if (emailType === 'welcome') {
+  if (effectiveEmailType === 'welcome') {
     brand.welcomeEmailReceived = true;
     brand.welcomeEmailReceivedAt = emailMessage.receivedAt;
     brand.welcomeEmailMessageId = messageId;
@@ -232,7 +281,7 @@ async function processSingleMessage(messageId) {
     }
   }
 
-  if (emailType === 'confirmation') {
+  if (effectiveEmailType === 'confirmation') {
     brand.confirmationRequired = true;
     if (['failed', 'captcha_blocked', 'discovered', 'submitted', 'subscribing'].includes(brand.onboardingStatus)) {
       await brand.updateStatus('awaiting_confirmation', 'Confirmation email detected; queued for confirmation processor');
@@ -241,7 +290,7 @@ async function processSingleMessage(messageId) {
     }
   }
 
-  if (emailType === 'newsletter') {
+  if (effectiveEmailType === 'newsletter') {
     if (!brand.firstNewsletterAt) brand.firstNewsletterAt = emailMessage.receivedAt;
     brand.lastNewsletterAt = emailMessage.receivedAt;
     brand.confirmationRequired = false;
@@ -258,13 +307,13 @@ async function processSingleMessage(messageId) {
       await brand.save();
     }
   } else {
-    if (!['welcome', 'confirmation'].includes(emailType)) {
+    if (!['welcome', 'confirmation'].includes(effectiveEmailType)) {
       await brand.save();
     }
   }
 
   await emailMessage.save();
-  return { matched: true, emailType, brandId: String(brand._id) };
+  return { matched: true, emailType: effectiveEmailType, brandId: String(brand._id) };
 }
 
 async function processInbox({ hours = 24, maxResults = 100 } = {}) {
