@@ -18,6 +18,22 @@ function getClient() {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+function normalizeCategorizationPayload(brand, data = {}) {
+  const base = getDefaultCategorization(brand);
+  const merged = { ...base, ...(data || {}) };
+  if (!Array.isArray(merged.categories)) merged.categories = base.categories;
+  if (!Array.isArray(merged.productTypes)) merged.productTypes = base.productTypes;
+  if (!Array.isArray(merged.tags)) merged.tags = base.tags;
+  if (!Array.isArray(merged.lifestyleTags)) merged.lifestyleTags = base.lifestyleTags;
+  if (!Array.isArray(merged.targetDemographic)) merged.targetDemographic = base.targetDemographic;
+  if (!Array.isArray(merged.affiliateNetworks)) merged.affiliateNetworks = base.affiliateNetworks;
+  if (!merged.primaryCategory) merged.primaryCategory = base.primaryCategory;
+  if (!merged.description) merged.description = base.description;
+  if (typeof merged.qualityScore !== 'number') merged.qualityScore = base.qualityScore;
+  if (typeof merged.affiliatePotentialScore !== 'number') merged.affiliatePotentialScore = base.affiliatePotentialScore;
+  return merged;
+}
+
 /**
  * Full AI categorization of a brand.
  * Returns categories, tags, scores, and demographic data.
@@ -32,7 +48,7 @@ async function categorizeBrand(brand) {
   }
 
   const prompt = `Classify this D2C brand and return compact JSON only (no markdown, no prose).
-Keep arrays short and strings concise.
+Output only required fields used by pipeline.
 
 Brand:
 name=${brand.name}
@@ -62,10 +78,7 @@ Return exactly:
   "estimatedRevShare":"unknown",
   "qualityScore":5,
   "affiliatePotentialScore":5,
-  "contentScore":null,
-  "description":"",
-  "headquarters":"unknown",
-  "reasoning":""
+  "description":""
 }
 
 Constraints:
@@ -75,13 +88,12 @@ Constraints:
 - lifestyleTags: 0-3
 - targetDemographic: 1-4
 - affiliateNetworks: 0-3
-- description max 16 words
-- reasoning max 10 words`;
+- description max 12 words`;
 
   try {
     const response = await client.messages.create({
       model:      'claude-haiku-4-5-20251001',
-      max_tokens: 560,
+      max_tokens: 360,
       messages:   [{ role: 'user', content: prompt }]
     });
     logger.info(`[llm] phase=categorize_single brand=${brand.name} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
@@ -91,7 +103,8 @@ Constraints:
     // Strip any markdown code fences if present
     const jsonStr = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
 
-    const data = JSON.parse(jsonStr);
+    const parsedData = JSON.parse(jsonStr);
+    const data = normalizeCategorizationPayload(brand, parsedData);
 
     // Validate required fields
     if (!data.primaryCategory || !data.qualityScore) {
@@ -125,17 +138,18 @@ async function categorizeBrandBatch(brands) {
     }));
   }
   const brandsList = brands.map((brand, i) =>
-    `Brand ${i + 1}:\n- Name: ${brand.name}\n- Domain: ${brand.domain}\n- Website: ${brand.websiteUrl || 'N/A'}\n- Description: ${brand.description || 'Not available'}\n- Industry tags: ${(brand.milledIndustrialTags || []).join(', ') || 'None'}`
-  ).join('\n\n');
+    `${i + 1}|${brand.name}|${brand.domain}|${brand.websiteUrl || 'N/A'}|${(brand.description || 'N/A').slice(0, 120)}|${(brand.milledIndustrialTags || []).slice(0, 5).join(',') || 'none'}`
+  ).join('\n');
 
   const prompt = `Analyze ${brands.length} D2C brands and return JSON array only. No markdown.
-Be concise: short arrays, short strings.
+Be concise.
 
-Brands:
+Brands format:
+index|name|domain|website|description|tags
 ${brandsList}
 
 Each array item must include:
-primaryCategory,categories,productTypes,tags,lifestyleTags,targetDemographic,genderFocus,priceRange,brandTier,audienceSize,businessModel,affiliateNetworks,hasAffiliateProgram,estimatedRevShare,qualityScore,affiliatePotentialScore,contentScore,description,headquarters,reasoning
+primaryCategory,categories,productTypes,tags,lifestyleTags,targetDemographic,genderFocus,priceRange,brandTier,audienceSize,businessModel,affiliateNetworks,hasAffiliateProgram,estimatedRevShare,qualityScore,affiliatePotentialScore,description
 
 Constraints:
 - categories 1-3
@@ -144,12 +158,11 @@ Constraints:
 - lifestyleTags 0-3
 - targetDemographic 1-4
 - affiliateNetworks 0-3
-- description max 16 words
-- reasoning max 10 words`;
+- description max 12 words`;
 
   const response = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: Math.min(2200, 280 + brands.length * 190),
+    max_tokens: Math.min(1100, 180 + brands.length * 110),
     messages: [{ role: 'user', content: prompt }]
   });
   logger.info(`[llm] phase=categorize_batch count=${brands.length} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
@@ -169,7 +182,7 @@ Constraints:
       return { success: false, data: getDefaultCategorization(brands[i]), error: 'Missing required fields' };
     }
     logger.info(`    ${brands[i].name} -> ${data.primaryCategory} | Q:${data.qualityScore}/10 | A:${data.affiliatePotentialScore}/10`);
-    return { success: true, data };
+    return { success: true, data: normalizeCategorizationPayload(brands[i], data) };
   });
 }
 
@@ -181,7 +194,7 @@ Constraints:
 async function categorizeBrands(brands) {
   logger.info(`\n  Categorizing ${brands.length} brands with AI...`);
   const results = [];
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = Math.max(2, Math.min(12, parseInt(process.env.CATEGORIZER_BATCH_SIZE || '8', 10)));
 
   for (let i = 0; i < brands.length; i += BATCH_SIZE) {
     const batch = brands.slice(i, i + BATCH_SIZE);

@@ -58,7 +58,8 @@ async function discoverBrandsWithClaude(limit, existingDomains = new Set()) {
     ...history.map((d) => normalizeDomain(d))
   ]);
 
-  const avoidList = Array.from(blocked).filter(Boolean).slice(0, 220);
+  const avoidListMax = Math.max(20, parseInt(process.env.DISCOVERY_AVOID_LIST_MAX || '60', 10));
+  const avoidList = Array.from(blocked).filter(Boolean).slice(-avoidListMax);
   const prompt = `Return exactly ${limit} real D2C ecommerce brands as compact JSON only.
 No markdown. No prose.
 
@@ -77,7 +78,7 @@ Rules:
   try {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: Math.max(320, Math.min(700, 180 + limit * 42)),
+      max_tokens: Math.max(260, Math.min(520, 140 + limit * 32)),
       messages: [{ role: 'user', content: prompt }]
     });
     logger.info(`[llm] phase=discovery req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);

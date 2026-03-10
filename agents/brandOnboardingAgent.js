@@ -5,7 +5,7 @@
 const Brand = require('../models/Brand');
 const { discoverBrands } = require('../services/brandDiscovery');
 const { signUpForNewsletter } = require('../services/newsletterSignup');
-const { categorizeBrand } = require('../services/brandCategorizer');
+const { categorizeBrand, categorizeBrands } = require('../services/brandCategorizer');
 const { filterDuplicates } = require('../services/duplicateChecker');
 const { scanRecentEmails, detectStaleBrands } = require('../services/emailChangeDetector');
 const { classifySignupFailure } = require('../utils/signupFailure');
@@ -50,15 +50,43 @@ async function runFullOnboarding(batchSize, emit, getStopFlag) {
   const toOnboard = unique;
   emit('info', 'categorization', ` Phase 2: AI categorizing ${toOnboard.length} brands...`);
   const categorizationResults = new Map();
+  const existingByDomain = new Map(
+    (await Brand.find({ domain: { $in: toOnboard.map((brand) => brand.domain) } })
+      .select('domain primaryCategory categories tags lifestyleTags targetDemographic productTypes priceRange brandTier audienceSize genderFocus businessModel qualityScore affiliatePotentialScore affiliateNetworks hasAffiliateProgram estimatedRevShare description')
+      .lean())
+      .map((doc) => [String(doc.domain || '').toLowerCase(), doc])
+  );
+
+  const aiQueue = [];
   for (const brand of toOnboard) {
-    if (getStopFlag()) { emit('warn', 'stop', ' Stopped by user'); return stats; }
-    const result = await categorizeBrand(brand);
-    if (result.success) {
-      categorizationResults.set(brand.domain, result.data);
+    const existing = existingByDomain.get(String(brand.domain || '').toLowerCase());
+    if (existing?.primaryCategory && existing?.qualityScore && existing?.affiliatePotentialScore) {
+      categorizationResults.set(brand.domain, existing);
       stats.categorized++;
-      emit('info', 'categorization', `    ${brand.name} -> ${result.data.primaryCategory || 'uncategorized'}`);
+      emit('info', 'categorization', `    ${brand.name} -> ${existing.primaryCategory} (cached)`);
+    } else {
+      aiQueue.push(brand);
     }
-    await sleep(300);
+  }
+
+  if (aiQueue.length) {
+    const batchResults = await categorizeBrands(aiQueue);
+    for (const result of batchResults) {
+      if (getStopFlag()) { emit('warn', 'stop', ' Stopped by user'); return stats; }
+      if (result.success) {
+        categorizationResults.set(result.brand.domain, result.data);
+        stats.categorized++;
+        emit('info', 'categorization', `    ${result.brand.name} -> ${result.data.primaryCategory || 'uncategorized'}`);
+      } else {
+        // Safety fallback for individual failures in a batch call path.
+        const fallback = await categorizeBrand(result.brand);
+        if (fallback.success) {
+          categorizationResults.set(result.brand.domain, fallback.data);
+          stats.categorized++;
+          emit('info', 'categorization', `    ${result.brand.name} -> ${fallback.data.primaryCategory || 'uncategorized'}`);
+        }
+      }
+    }
   }
   emit('success', 'categorization', `[OK] Categorized ${stats.categorized} brands`);
   emit('info', 'signup', ` Phase 3: Signing up for ${toOnboard.length} newsletters...`);
