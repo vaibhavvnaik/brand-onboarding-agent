@@ -59,6 +59,8 @@ flowchart TD
 - If a `confirmation` email arrives, the inbox worker marks `confirmationRequired=true` and keeps/moves brand in `awaiting_confirmation`.
 - If a `newsletter` email arrives, the inbox worker promotes the brand to `active` (subscription proven live), even if previous status was `failed` or `captcha_blocked`.
 - Confirmation processor now auto-resolves missing `brandId` by sender/domain and can continue confirmation clicks for manually signed-up brands.
+- If welcome/newsletter cannot be directly mapped by sender address, inbox resolver uses domain mentions + brand phrases in email content to infer the correct failed/captcha brand with confidence scoring.
+- Trusted welcome proof (brand-domain match or high-confidence content reference) now marks brand `active` in the next run, so cowork/manual signups continue automatically.
 
 This means cowork/manual signups are automatically regularized into the same downstream workflow once inbound email evidence appears.
 

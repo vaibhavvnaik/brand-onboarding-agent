@@ -86,6 +86,92 @@ function inferNewsletterLikeType(parsed, detectedType, brand) {
   return currentType;
 }
 
+function normalizeNameForMatch(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function buildEmailReferenceText(parsed) {
+  return [
+    parsed?.subject || '',
+    parsed?.snippet || '',
+    parsed?.bodyText || '',
+    parsed?.bodyHtml || ''
+  ].join(' ').toLowerCase().slice(0, 8000);
+}
+
+async function resolveBrandByContentReference(parsed, senderDomain, emailType) {
+  const text = buildEmailReferenceText(parsed);
+  if (!text) return null;
+
+  const pendingStatuses = ['failed', 'captcha_blocked', 'awaiting_confirmation', 'subscribing', 'submitted', 'discovered'];
+  const domainMatches = new Set();
+  const domainRegex = /\b([a-z0-9-]+(?:\.[a-z0-9-]+)+\.[a-z]{2,})\b/gi;
+  let match;
+  while ((match = domainRegex.exec(text)) !== null) {
+    const rawDomain = normalizeDomain(match[1]);
+    const root = getRegistrableDomain(rawDomain);
+    if (root) domainMatches.add(root);
+  }
+
+  const linkDomains = extractMeaningfulLinkDomains(parsed?.links || []);
+  for (const domain of linkDomains) domainMatches.add(getRegistrableDomain(domain));
+  if (senderDomain) domainMatches.add(getRegistrableDomain(senderDomain));
+
+  const candidateDomains = Array.from(domainMatches).filter(Boolean);
+  if (candidateDomains.length) {
+    const byDomain = await Brand.findOne({
+      onboardingStatus: { $in: pendingStatuses },
+      domain: { $in: candidateDomains }
+    }).sort({ updatedAt: -1 });
+    if (byDomain) {
+      return { brand: byDomain, source: 'content_domain_match', confidence: 9 };
+    }
+  }
+
+  if (!['welcome', 'newsletter'].includes(String(emailType || ''))) return null;
+
+  const phrasePatterns = [
+    /welcome to\s+([a-z0-9&' -]{2,40})/i,
+    /thanks for (?:joining|subscribing(?: to)?|signing up(?: for)?)\s+([a-z0-9&' -]{2,40})/i,
+    /you(?:'re| are) (?:now )?subscribed to\s+([a-z0-9&' -]{2,40})/i
+  ];
+
+  const phrases = new Set();
+  for (const pattern of phrasePatterns) {
+    const found = text.match(pattern);
+    if (found && found[1]) phrases.add(normalizeNameForMatch(found[1]));
+  }
+  if (!phrases.size) return null;
+
+  const candidates = await Brand.find({
+    onboardingStatus: { $in: pendingStatuses }
+  }).select('name domain onboardingStatus').limit(600);
+
+  let best = null;
+  let bestScore = 0;
+  for (const brand of candidates) {
+    const brandName = normalizeNameForMatch(brand.name);
+    if (!brandName) continue;
+    let score = 0;
+    for (const phrase of phrases) {
+      if (!phrase) continue;
+      if (phrase === brandName) score += 8;
+      else if (brandName.includes(phrase) || phrase.includes(brandName)) score += 5;
+    }
+    if (senderDomain && domainsRelated(senderDomain, brand.domain)) score += 4;
+    if (text.includes(brandName)) score += 2;
+    if (score > bestScore) {
+      best = brand;
+      bestScore = score;
+    }
+  }
+
+  if (best && bestScore >= 8) {
+    return { brand: best, source: 'content_brand_phrase', confidence: bestScore };
+  }
+  return null;
+}
+
 async function resolveBrand(senderEmail, senderDomain, links = []) {
   if (!senderEmail && !senderDomain) return null;
 
@@ -207,7 +293,19 @@ async function processSingleMessage(messageId) {
   const { emailMessage, senderEmail, senderDomain, emailType } = await upsertEmailMessage(parsed);
   emailMessage.state = 'typed';
 
-  const brand = await resolveBrand(senderEmail, senderDomain, parsed.links || []);
+  let brand = await resolveBrand(senderEmail, senderDomain, parsed.links || []);
+  let matchSource = 'direct';
+  let matchConfidence = 10;
+  if (!brand) {
+    const inferred = await resolveBrandByContentReference(parsed, senderDomain, emailType);
+    if (inferred?.brand) {
+      brand = inferred.brand;
+      matchSource = inferred.source || 'content_reference';
+      matchConfidence = inferred.confidence || 0;
+      logger.info(`[scan_inbox] Content-based brand match: "${parsed.subject || ''}" -> ${brand.name} (${matchSource}, confidence=${matchConfidence})`);
+    }
+  }
+
   if (!brand) {
     emailMessage.state = 'brand_unresolved';
     emailMessage.needsReview = true;
@@ -268,12 +366,18 @@ async function processSingleMessage(messageId) {
     const welcomeSet = new Set((brand.welcomeSenderEmails || []).map((email) => String(email).toLowerCase()));
     if (senderEmail) welcomeSet.add(senderEmail.toLowerCase());
     brand.welcomeSenderEmails = Array.from(welcomeSet);
-    if (brand.onboardingStatus === 'awaiting_confirmation') {
+    const trustedByDomain = !!(senderDomain && domainsRelated(senderDomain, brand.domain));
+    const trustedByContent = matchSource !== 'direct' && matchConfidence >= 8;
+    const shouldMarkSignedUp = trustedByDomain || trustedByContent;
+    if (shouldMarkSignedUp) {
+      await brand.updateStatus('active', 'Welcome email trusted as signup proof (manual/cowork normalized)');
+    } else if (brand.onboardingStatus === 'awaiting_confirmation') {
       brand.statusHistory.push({
         status: brand.onboardingStatus,
         changedAt: new Date(),
         note: 'Welcome email received; waiting for first recurring newsletter sender'
       });
+      await brand.save();
     } else if (['failed', 'captcha_blocked', 'discovered', 'submitted', 'subscribing'].includes(brand.onboardingStatus)) {
       await brand.updateStatus('awaiting_confirmation', 'Welcome email received after manual/cowork signup; re-entered workflow');
     } else {
