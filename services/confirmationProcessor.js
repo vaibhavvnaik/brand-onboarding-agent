@@ -1,7 +1,53 @@
 const Brand = require('../models/Brand');
 const EmailMessage = require('../models/EmailMessage');
 const { clickConfirmationLinkFromParsedMessage } = require('./emailConfirmation');
+const { extractSenderEmail, extractDomainFromEmail } = require('../config/gmail');
 const logger = require('../utils/logger');
+
+function normalizeDomain(domain) {
+  return String(domain || '').replace(/^www\./i, '').toLowerCase().trim();
+}
+
+function escapeRegex(input) {
+  return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getApexDomain(domain) {
+  const normalized = normalizeDomain(domain);
+  const parts = normalized.split('.').filter(Boolean);
+  if (parts.length < 2) return normalized;
+  return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+}
+
+async function resolveBrandForMessage(message) {
+  const senderEmail = extractSenderEmail(message?.from || '');
+  const senderDomain = normalizeDomain(extractDomainFromEmail(senderEmail));
+
+  if (senderEmail) {
+    const byKnownSender = await Brand.findOne({
+      $or: [
+        { currentSenderEmail: { $regex: new RegExp(`^${escapeRegex(senderEmail)}$`, 'i') } },
+        { knownSenderEmails: { $regex: new RegExp(`^${escapeRegex(senderEmail)}$`, 'i') } },
+        { welcomeSenderEmails: { $regex: new RegExp(`^${escapeRegex(senderEmail)}$`, 'i') } },
+        { 'senderEmailHistory.email': { $regex: new RegExp(`^${escapeRegex(senderEmail)}$`, 'i') } }
+      ]
+    });
+    if (byKnownSender) return byKnownSender;
+  }
+
+  if (senderDomain) {
+    const apex = getApexDomain(senderDomain);
+    const byDomain = await Brand.findOne({
+      $or: [
+        { domain: { $regex: new RegExp(`^${escapeRegex(senderDomain)}$`, 'i') } },
+        { domain: { $regex: new RegExp(`^${escapeRegex(apex)}$`, 'i') } }
+      ]
+    });
+    if (byDomain) return byDomain;
+  }
+
+  return null;
+}
 
 async function processPendingConfirmations({ limit = 50 } = {}) {
   const candidates = await EmailMessage.find({
@@ -19,23 +65,17 @@ async function processPendingConfirmations({ limit = 50 } = {}) {
   };
 
   for (const message of candidates) {
-    if (!message.brandId) {
-      message.processedBy.confirmation_runner = {
-        done: false,
-        at: new Date(),
-        version: 'v1',
-        attempts: (message.processedBy?.confirmation_runner?.attempts || 0) + 1,
-        status: 'skipped',
-        lastProcessedAt: new Date(),
-        error: 'Missing brandId'
-      };
-      message.needsReview = true;
-      await message.save();
-      stats.skipped += 1;
-      continue;
+    let brand = null;
+    if (message.brandId) {
+      brand = await Brand.findById(message.brandId);
+    }
+    if (!brand) {
+      brand = await resolveBrandForMessage(message);
+      if (brand) {
+        message.brandId = brand._id;
+      }
     }
 
-    const brand = await Brand.findById(message.brandId);
     if (!brand) {
       message.processedBy.confirmation_runner = {
         done: false,
@@ -44,11 +84,11 @@ async function processPendingConfirmations({ limit = 50 } = {}) {
         attempts: (message.processedBy?.confirmation_runner?.attempts || 0) + 1,
         status: 'error',
         lastProcessedAt: new Date(),
-        error: 'Brand not found'
+        error: message.brandId ? 'Brand not found' : 'Missing brandId and could not auto-resolve'
       };
       message.needsReview = true;
       await message.save();
-      stats.failed += 1;
+      stats.skipped += 1;
       continue;
     }
 

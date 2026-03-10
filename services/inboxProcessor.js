@@ -178,6 +178,19 @@ async function processSingleMessage(messageId) {
         changedAt: new Date(),
         note: 'Welcome email received; waiting for first recurring newsletter sender'
       });
+    } else if (['failed', 'captcha_blocked', 'discovered', 'submitted', 'subscribing'].includes(brand.onboardingStatus)) {
+      await brand.updateStatus('awaiting_confirmation', 'Welcome email received after manual/cowork signup; re-entered workflow');
+    } else {
+      await brand.save();
+    }
+  }
+
+  if (emailType === 'confirmation') {
+    brand.confirmationRequired = true;
+    if (['failed', 'captcha_blocked', 'discovered', 'submitted', 'subscribing'].includes(brand.onboardingStatus)) {
+      await brand.updateStatus('awaiting_confirmation', 'Confirmation email detected; queued for confirmation processor');
+    } else {
+      await brand.save();
     }
   }
 
@@ -192,13 +205,15 @@ async function processSingleMessage(messageId) {
       } else {
         await brand.updateStatus('active', 'Direct newsletter received without prior welcome/confirmation; inferred subscription is active');
       }
-    } else if (brand.onboardingStatus === 'subscribing' || brand.onboardingStatus === 'submitted' || brand.onboardingStatus === 'discovered') {
+    } else if (brand.onboardingStatus === 'subscribing' || brand.onboardingStatus === 'submitted' || brand.onboardingStatus === 'discovered' || brand.onboardingStatus === 'failed' || brand.onboardingStatus === 'captcha_blocked') {
       await brand.updateStatus('active', 'Direct newsletter received; activated without explicit confirmation step');
     } else {
       await brand.save();
     }
   } else {
-    await brand.save();
+    if (!['welcome', 'confirmation'].includes(emailType)) {
+      await brand.save();
+    }
   }
 
   await emailMessage.save();

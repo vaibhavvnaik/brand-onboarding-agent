@@ -53,6 +53,15 @@ flowchart TD
 - `duplicate`: Candidate rejected due duplicate domain/brand match.
 - `skipped`: Manually skipped/removed.
 
+## Manual (Cowork) Signup Normalization
+
+- If a brand was `failed` or `captcha_blocked` and a `welcome` email arrives, the inbox worker moves it to `awaiting_confirmation`.
+- If a `confirmation` email arrives, the inbox worker marks `confirmationRequired=true` and keeps/moves brand in `awaiting_confirmation`.
+- If a `newsletter` email arrives, the inbox worker promotes the brand to `active` (subscription proven live), even if previous status was `failed` or `captcha_blocked`.
+- Confirmation processor now auto-resolves missing `brandId` by sender/domain and can continue confirmation clicks for manually signed-up brands.
+
+This means cowork/manual signups are automatically regularized into the same downstream workflow once inbound email evidence appears.
+
 ## Email Type Definitions
 
 - `confirmation`: Asks user to confirm/verify subscription.

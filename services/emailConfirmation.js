@@ -35,6 +35,17 @@ const WELCOME_PATTERNS = [
   /officially (a )?member/i,
 ];
 
+const NEWSLETTER_PATTERNS = [
+  /\bnewsletter\b/i,
+  /\bweekly\b.{0,20}(update|digest|roundup|recap)?/i,
+  /\bdaily\b.{0,20}(update|digest|brief)?/i,
+  /\bnew arrivals?\b/i,
+  /\blatest\b.{0,20}(news|drops|arrivals|stories)/i,
+  /\bthis week\b/i,
+  /\bin your inbox\b/i,
+  /\btop picks?\b/i
+];
+
 /**
  * Wait for and handle a confirmation email from a specific brand domain.
  * @param {string} brandDomain - e.g. "allbirds.com"
@@ -157,7 +168,10 @@ function classifyEmailType(subject, bodyText, bodyHtml) {
   if (WELCOME_PATTERNS.some(p => p.test(combined))) return 'welcome';
 
   // Promotional/newsletter
-  if (/sale|off|discount|promo|deal|shop|buy|limited|exclusive|new arrival/i.test(combined)) {
+  if (
+    NEWSLETTER_PATTERNS.some((p) => p.test(combined)) ||
+    /sale|off|discount|promo|deal|shop|buy|limited|exclusive|new arrival|drops?|collection/i.test(combined)
+  ) {
     return 'newsletter';
   }
 
