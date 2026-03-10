@@ -7,7 +7,9 @@ Run a non-blocking, reliable pipeline for onboarding brands at scale without lon
 1. `discover_and_signup`
 - Discover candidate brands.
 - Attempt newsletter signup.
-- Set brand status to `awaiting_confirmation`.
+- Update brand onboarding status as:
+  - `discovered -> subscribing -> submitted -> awaiting_confirmation` on normal path
+  - `failed` or `captcha_blocked` on blocked/error path
 - Do **not** block waiting for inbox events.
 
 2. `scan_inbox`
@@ -28,6 +30,23 @@ Run a non-blocking, reliable pipeline for onboarding brands at scale without lon
 
 ## Message Lifecycle
 `discovered -> parsed -> brand_resolved -> typed -> confirmation_processed -> ingested -> finalized`
+
+Failure/edge paths:
+- `discovered -> parsed -> brand_unresolved -> typed -> finalized`
+- `discovered -> parsed -> brand_resolved -> typed -> finalized` (non-actionable/transactional)
+
+## Brand Status Lifecycle
+Primary progression:
+`discovered -> subscribing -> submitted -> awaiting_confirmation -> confirmed -> active`
+
+Alternative valid activations:
+- `submitted -> active` (welcome/newsletter arrives without explicit confirmation)
+- `awaiting_confirmation -> active` (regular newsletter proves subscription active)
+
+Failure states:
+- `failed`
+- `captcha_blocked`
+- `skipped`
 
 Important:
 - Gmail read/unread is not workflow state.
