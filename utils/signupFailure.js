@@ -12,7 +12,10 @@ function classifySignupFailure(errorMessage = '', strategy = null) {
   if (msg.includes('hard timeout') || msg.includes('exceeded 3 minutes')) {
     return { category: 'automation_timeout', code: 'hard_timeout' };
   }
-  if (msg.includes('captcha')) {
+  if (msg.includes('captcha challenge blocked automated submission') || msg.includes('captcha_challenge_present')) {
+    return { category: 'captcha_blocked', code: 'captcha_challenge_present' };
+  }
+  if (msg.includes('captcha') || msg.includes('hcaptcha') || msg.includes('recaptcha')) {
     return { category: 'captcha_blocked', code: 'captcha_detected' };
   }
   if (msg.includes('no signup form found')) {

@@ -66,6 +66,17 @@ const SIGNUP_PAGE_PATTERNS = [
   '/stay-connected'
 ];
 
+function hasCaptchaFailure(attemptTrace = []) {
+  return (attemptTrace || []).some((attempt) => String(attempt?.reason || '').toLowerCase().includes('captcha'));
+}
+
+function isPotentialCaptchaState(state = {}) {
+  if (!state || typeof state !== 'object') return false;
+  const hasMarker = !!(state.hasHcaptchaContainer || state.hasHCaptchaInput || state.hasRecaptchaInput || state.hasCaptchaIframe || state.hcaptchaBound || state.recaptchaBound);
+  const tokenMissing = Number(state.hCaptchaValueLen || 0) === 0 && Number(state.recaptchaValueLen || 0) === 0;
+  return hasMarker && tokenMissing;
+}
+
 // -- Main Signup Function (with hard 3-min timeout) ------------
 /**
  * Attempt to subscribe to a brand's newsletter using Playwright.
@@ -141,7 +152,8 @@ async function _signUpCore(websiteUrl, brandName) {
       strategy,
       success: !!(res && res.success),
       durationMs,
-      reason: (res && res.reason) || null
+      reason: (res && res.reason) || null,
+      diagnostic: (res && res.diagnostic) || null
     });
   };
 
@@ -258,8 +270,13 @@ async function _signUpCore(websiteUrl, brandName) {
       }
     }
 
-    logger.info(`[EMAIL] ${brandName}: all strategies exhausted, no form found`);
-    result.error = 'No signup form found after all strategies exhausted';
+    if (hasCaptchaFailure(result.attemptTrace)) {
+      logger.info(`[EMAIL] ${brandName}: all strategies exhausted, captcha challenge blocked automation`);
+      result.error = 'CAPTCHA challenge blocked automated submission';
+    } else {
+      logger.info(`[EMAIL] ${brandName}: all strategies exhausted, no form found`);
+      result.error = 'No signup form found after all strategies exhausted';
+    }
     const classified = classifySignupFailure(result.error, result.strategy);
     result.failureCategory = classified.category;
     result.failureCode = classified.code;
@@ -417,8 +434,11 @@ async function tryDedicatedSignupPage(page, baseUrl, profile, brandName) {
       if (!res || res.status() >= 400) continue;
       await sleep(1500);
       const filled = await fillEmailForm(page, profile, brandName);
-      if (filled) {
+      if (filled.success) {
         return { success: true, formUrl: url, espProvider: detectFromHtml(await page.content()) };
+      }
+      if (filled.reason === 'captcha_challenge_present') {
+        return { success: false, reason: filled.reason, diagnostic: filled.diagnostic || null };
       }
     } catch {
       continue;
@@ -445,9 +465,12 @@ async function tryFooterForm(page, websiteUrl, profile, brandName) {
 
       const emailInput = await findEmailInput(page, { preferFooter: true, requireNewsletterContext: true });
       if (!emailInput) continue;
-      const success = await fillEmailForm(page, profile, brandName, emailInput);
-      if (success) {
+      const fillResult = await fillEmailForm(page, profile, brandName, emailInput);
+      if (fillResult.success) {
         return { success: true, formUrl: websiteUrl, espProvider: detectFromHtml(await page.content()) };
+      }
+      if (fillResult.reason === 'captcha_challenge_present') {
+        return { success: false, reason: fillResult.reason, diagnostic: fillResult.diagnostic || null };
       }
     }
   } catch (err) {
@@ -477,9 +500,12 @@ async function tryPopupForm(page, websiteUrl, profile, brandName) {
     const emailInput = await findEmailInput(page, { requireNewsletterContext: true });
     if (!emailInput) return { success: false, reason: 'popup_email_input_not_found' };
 
-    const success = await fillEmailForm(page, profile, brandName, emailInput);
-    if (success) {
+    const fillResult = await fillEmailForm(page, profile, brandName, emailInput);
+    if (fillResult.success) {
       return { success: true, formUrl: websiteUrl, espProvider: detectFromHtml(await page.content()) };
+    }
+    if (fillResult.reason === 'captcha_challenge_present') {
+      return { success: false, reason: fillResult.reason, diagnostic: fillResult.diagnostic || null };
     }
   } catch (err) {
     logger.debug(`Popup strategy failed: ${err.message}`);
@@ -498,8 +524,14 @@ async function tryContextualForm(page, websiteUrl, profile, brandName) {
     await sleep(600);
     const emailInput = await findEmailInput(page, { requireNewsletterContext: true });
     if (!emailInput) return { success: false, reason: 'contextual_email_input_not_found' };
-    const success = await fillEmailForm(page, profile, brandName, emailInput);
-    if (!success) return { success: false, reason: 'contextual_form_submit_failed' };
+    const fillResult = await fillEmailForm(page, profile, brandName, emailInput);
+    if (!fillResult.success) {
+      return {
+        success: false,
+        reason: fillResult.reason === 'captcha_challenge_present' ? fillResult.reason : 'contextual_form_submit_failed',
+        diagnostic: fillResult.diagnostic || null
+      };
+    }
     return { success: true, formUrl: websiteUrl, espProvider: detectFromHtml(await page.content()) };
   } catch (err) {
     logger.debug(`Contextual form strategy failed: ${err.message}`);
@@ -560,33 +592,92 @@ async function findEmailInput(page, options = {}) {
 async function fillEmailForm(page, profile, brandName, existingEmailInput = null) {
   try {
     const emailInput = existingEmailInput || await findEmailInput(page);
-    if (!emailInput) return false;
+    if (!emailInput) return { success: false, reason: 'email_input_not_found', diagnostic: null };
+
+    const formHandle = await emailInput.evaluateHandle((el) => el.closest('form'));
+    const hasForm = await formHandle.evaluate((form) => !!form).catch(() => false);
+    if (!hasForm) {
+      return { success: false, reason: 'email_input_form_not_found', diagnostic: null };
+    }
+
+    const [emailMeta, preCaptchaState] = await Promise.all([
+      emailInput.evaluate((el) => ({
+        id: el.id || null,
+        name: el.name || null,
+        type: el.type || null,
+        placeholder: el.getAttribute('placeholder') || null,
+        ariaLabel: el.getAttribute('aria-label') || null
+      })),
+      detectCaptchaState(formHandle)
+    ]);
 
     await emailInput.click({ delay: 100 });
     await emailInput.fill('');
     await sleep(300);
     await emailInput.type(EMAIL, { delay: randomDelay(40, 100) });
     await sleep(500);
-
-    const form = await emailInput.evaluateHandle(el => el.closest('form'));
-    if (form) {
-      await fillAdditionalFormFields(page, form, profile);
-    }
+    await fillAdditionalFormFields(formHandle, profile);
 
     await sleep(500);
-    const submitted = await submitForm(page, emailInput);
-    if (!submitted) return false;
+    const submitResult = await submitForm(emailInput, formHandle);
+    if (!submitResult.submitted) {
+      return {
+        success: false,
+        reason: 'form_submit_not_found',
+        diagnostic: {
+          emailInput: emailMeta,
+          preCaptchaState,
+          submitResult
+        }
+      };
+    }
 
-    const success = await detectSignupSuccess(page, brandName);
-    return success;
+    const postCaptchaState = await detectCaptchaState(formHandle);
+    if (isPotentialCaptchaState(postCaptchaState)) {
+      return {
+        success: false,
+        reason: 'captcha_challenge_present',
+        diagnostic: {
+          emailInput: emailMeta,
+          preCaptchaState,
+          postCaptchaState,
+          submitResult
+        }
+      };
+    }
+
+    const success = await detectSignupSuccess(page, brandName, formHandle);
+    if (!success) {
+      return {
+        success: false,
+        reason: 'form_submission_not_confirmed',
+        diagnostic: {
+          emailInput: emailMeta,
+          preCaptchaState,
+          postCaptchaState,
+          submitResult
+        }
+      };
+    }
+
+    return {
+      success: true,
+      reason: null,
+      diagnostic: {
+        emailInput: emailMeta,
+        preCaptchaState,
+        postCaptchaState,
+        submitResult
+      }
+    };
   } catch (err) {
     logger.debug(`Form fill failed: ${err.message}`);
-    return false;
+    return { success: false, reason: 'form_fill_exception', diagnostic: { error: err.message } };
   }
 }
 
-async function fillAdditionalFormFields(page, formHandle, profile) {
-  const inputs = await page.$$('form input:not([type="hidden"]):not([type="email"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"])');
+async function fillAdditionalFormFields(formHandle, profile) {
+  const inputs = await formHandle.$$('input:not([type="hidden"]):not([type="email"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"])');
 
   for (const input of inputs) {
     try {
@@ -613,7 +704,7 @@ async function fillAdditionalFormFields(page, formHandle, profile) {
     }
   }
 
-  const selects = await page.$$('form select');
+  const selects = await formHandle.$$('select');
   for (const select of selects) {
     try {
       const visible = await select.isVisible();
@@ -638,7 +729,7 @@ async function fillAdditionalFormFields(page, formHandle, profile) {
     }
   }
 
-  const checkboxes = await page.$$('form input[type="checkbox"]');
+  const checkboxes = await formHandle.$$('input[type="checkbox"]');
   for (const cb of checkboxes) {
     try {
       const visible = await cb.isVisible();
@@ -652,13 +743,23 @@ async function fillAdditionalFormFields(page, formHandle, profile) {
   }
 }
 
-async function submitForm(page, emailInput) {
+async function submitForm(emailInput, formHandle = null) {
+  const root = formHandle || await emailInput.evaluateHandle((el) => el.closest('form'));
+
   for (const selector of SUBMIT_SELECTORS) {
     try {
-      const btn = await page.$(selector);
+      const btn = await root.$(selector);
       if (btn && await btn.isVisible()) {
+        const submitMeta = await btn.evaluate((el, sel) => ({
+          selector: sel,
+          tag: el.tagName || null,
+          id: el.id || null,
+          name: el.getAttribute('name') || null,
+          type: el.getAttribute('type') || null,
+          ariaLabel: el.getAttribute('aria-label') || null
+        }), selector);
         await btn.click({ delay: 100 });
-        return true;
+        return { submitted: true, method: 'button_click', submitMeta };
       }
     } catch {
       continue;
@@ -666,25 +767,58 @@ async function submitForm(page, emailInput) {
   }
   try {
     await emailInput.press('Enter');
-    return true;
+    return { submitted: true, method: 'enter_key', submitMeta: null };
   } catch {
-    return false;
+    return { submitted: false, method: null, submitMeta: null };
   }
 }
 
-async function detectSignupSuccess(page, brandName) {
+async function detectCaptchaState(formHandle) {
+  return formHandle.evaluate((form) => {
+    if (!form) return {};
+    const hCaptcha = form.querySelector('textarea[name="h-captcha-response"], input[name="h-captcha-response"]');
+    const recaptcha = form.querySelector('textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"], textarea[name="recaptcha-v3-token"], input[name="recaptcha-v3-token"]');
+    const captchaIframe = form.querySelector('iframe[src*="hcaptcha"], iframe[src*="recaptcha"], iframe[title*="captcha" i]');
+    return {
+      formId: form.id || null,
+      formAction: form.getAttribute('action') || null,
+      formMethod: form.getAttribute('method') || null,
+      hcaptchaBound: String(form.dataset?.hcaptchaBound || '') === 'true',
+      recaptchaBound: String(form.dataset?.recaptchaBound || '') === 'true',
+      hasHcaptchaContainer: !!form.querySelector('.h-captcha, [data-sitekey]'),
+      hasHCaptchaInput: !!hCaptcha,
+      hasRecaptchaInput: !!recaptcha,
+      hasCaptchaIframe: !!captchaIframe,
+      hCaptchaValueLen: (hCaptcha?.value || '').trim().length,
+      recaptchaValueLen: (recaptcha?.value || '').trim().length
+    };
+  }).catch(() => ({}));
+}
+
+async function detectSignupSuccess(page, brandName, formHandle = null) {
   await Promise.race([
     page.waitForTimeout(3000),
     page.waitForNavigation({ timeout: 5000, waitUntil: 'networkidle' }).catch(() => {})
   ]);
 
+  const currentUrl = (page.url() || '').toLowerCase();
   const pageText = (await page.textContent('body').catch(() => '')).toLowerCase();
+  const formState = formHandle
+    ? await formHandle.evaluate((form) => {
+      if (!form) return null;
+      const statusNodes = form.querySelectorAll('[role="alert"], [aria-live], .alert, .errors, .form-status, [data-form-status]');
+      const statusText = Array.from(statusNodes).map((n) => (n.textContent || '').trim()).join(' ').toLowerCase();
+      const formText = (form.textContent || '').toLowerCase();
+      const invalidCount = form.querySelectorAll(':invalid').length;
+      return { statusText, formText, invalidCount };
+    }).catch(() => null)
+    : null;
 
   const successPatterns = [
     'thank you', 'thanks for', 'success', 'confirmed',
     "you're subscribed", 'you are subscribed', 'check your email',
     'welcome to', 'almost there', "you're in", 'signed up',
-    'added to', 'subscribed to'
+    'added to', 'subscribed to', 'customer_posted=true', 'contact_posted=true', 'posted_successfully=true'
   ];
 
   const alreadySubscribed = ['already subscribed', 'already on our list', 'already signed up'];
@@ -698,8 +832,14 @@ async function detectSignupSuccess(page, brandName) {
     return true;
   }
 
-  const errorPatterns = ['invalid email', 'error', 'please enter', 'required', 'captcha'];
-  if (errorPatterns.some(p => pageText.includes(p))) {
+  if (successPatterns.some((p) => currentUrl.includes(p))) {
+    logger.info(` [OK] ${brandName}: signup confirmed via URL markers`);
+    return true;
+  }
+
+  const formErrorText = `${formState?.statusText || ''} ${formState?.formText || ''}`;
+  const errorPatterns = ['invalid email', 'please enter', 'required', 'captcha', 'something went wrong', 'unable to submit'];
+  if ((formState?.invalidCount || 0) > 0 || errorPatterns.some((p) => formErrorText.includes(p))) {
     logger.debug(` [ERR] ${brandName}: error detected on page`);
     return false;
   }
