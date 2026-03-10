@@ -36,6 +36,11 @@
     .panel-table tbody tr:hover { background: rgba(255,255,255,0.03); }
     .table-wrap { overflow-x: auto; max-height: 18rem; }
     .mono-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .wf-cell { font-size: 10px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; border-radius: 9999px; padding: 2px 8px; display: inline-block; }
+    .wf-done { background: rgba(16,185,129,.15); color: #34d399; border: 1px solid rgba(16,185,129,.35); }
+    .wf-pending { background: rgba(245,158,11,.15); color: #fbbf24; border: 1px solid rgba(245,158,11,.35); }
+    .wf-failed { background: rgba(239,68,68,.15); color: #f87171; border: 1px solid rgba(239,68,68,.35); }
+    .wf-todo { background: rgba(100,116,139,.15); color: #94a3b8; border: 1px solid rgba(100,116,139,.35); }
   </style>
 </head>
 <body class="min-h-screen">
@@ -167,6 +172,19 @@
 <div class="max-w-screen-2xl mx-auto px-6 pb-4">
   <div class="glass rounded-xl p-4 mb-4">
     <div class="flex items-center justify-between mb-3">
+      <div>
+        <h3 class="text-sm font-semibold text-slate-200">Brand Workflow Matrix</h3>
+        <p class="text-[11px] text-slate-500 mt-1">Rows = brands, columns = workflow steps and substeps.</p>
+      </div>
+      <button onclick="loadWorkflowMatrix()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
+    </div>
+    <div id="workflowMatrix" class="text-xs text-slate-300">
+      <div class="text-slate-500">Loading workflow matrix...</div>
+    </div>
+  </div>
+
+  <div class="glass rounded-xl p-4 mb-4">
+    <div class="flex items-center justify-between mb-3">
       <h3 class="text-sm font-semibold text-slate-200">Workflow Step History</h3>
       <button onclick="loadWorkflowRuns()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
     </div>
@@ -290,6 +308,7 @@ let failedSignupQueueRows = [];
 document.addEventListener('DOMContentLoaded', () => {
   loadStats();
   loadBrands();
+  loadWorkflowMatrix();
   checkAgentStatus();
   loadActivityLogs();
   loadNewsletterArtifacts();
@@ -766,6 +785,73 @@ async function loadWorkflowRuns() {
   }
 }
 
+async function loadWorkflowMatrix() {
+  const el = document.getElementById('workflowMatrix');
+  if (!el) return;
+  el.innerHTML = '<div class="text-slate-500">Loading workflow matrix...</div>';
+  try {
+    const res = await fetch('/api/brands/workflow-matrix?limit=200&page=1');
+    if (res.status === 401) { window.location.href = '/dashboard/login'; return; }
+    if (!res.ok) throw new Error(`Workflow matrix request failed: ${res.status}`);
+    const data = await res.json();
+    const rows = data.rows || [];
+    if (!rows.length) {
+      el.innerHTML = '<div class="text-slate-500">No brands found for workflow matrix.</div>';
+      return;
+    }
+
+    el.innerHTML = `
+      <div class="mb-2 text-[11px] text-slate-500">Showing ${rows.length} of ${data.pagination?.total || rows.length} brands</div>
+      <div class="table-wrap">
+        <table class="panel-table min-w-[1500px]">
+          <thead>
+            <tr>
+              <th rowspan="2">Brand</th>
+              <th rowspan="2">Current Status</th>
+              <th colspan="3" class="text-center">Signup</th>
+              <th colspan="3" class="text-center">Email Lifecycle</th>
+              <th colspan="2" class="text-center">Finalization</th>
+              <th rowspan="2">Updated</th>
+            </tr>
+            <tr>
+              <th>Discovered</th>
+              <th>Attempt</th>
+              <th>Submitted</th>
+              <th>Welcome</th>
+              <th>Confirmation</th>
+              <th>Newsletter</th>
+              <th>Ingestion</th>
+              <th>Active</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>
+                  <div class="font-semibold">${escHtml(row.name || '')}</div>
+                  <div class="text-[10px] text-slate-500 mono-cell">${escHtml(row.domain || '')}</div>
+                </td>
+                <td><span class="badge-${statusClass(row.onboardingStatus)} text-[10px] px-2 py-0.5 rounded-full">${statusLabel(row.onboardingStatus)}</span></td>
+                <td>${workflowCell(row.steps?.discovered)}</td>
+                <td>${workflowCell(row.steps?.signupAttempt)}</td>
+                <td>${workflowCell(row.steps?.signupSubmitted)}</td>
+                <td>${workflowCell(row.steps?.welcomeEmail)}</td>
+                <td>${workflowCell(row.steps?.confirmation)}</td>
+                <td>${workflowCell(row.steps?.newsletterSeen)}</td>
+                <td>${workflowCell(row.steps?.ingestion)}</td>
+                <td>${workflowCell(row.steps?.active)}</td>
+                <td class="whitespace-nowrap">${row.updatedAt ? escHtml(fmtDate(row.updatedAt)) : '-'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="text-red-300">Failed to load workflow matrix: ${escHtml(e.message)}</div>`;
+  }
+}
+
 async function loadFailedSignupQueue() {
   const el = document.getElementById('failedSignupQueue');
   if (!el) return;
@@ -909,6 +995,11 @@ function fmtDate(d) { try { return new Date(d).toLocaleString(); } catch { retur
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
 function infoRow(label, value) {
   return `<div class="glass rounded-lg p-3"><p class="text-xs text-slate-500 mb-1">${label}</p><p class="text-sm">${value}</p></div>`;
+}
+function workflowCell(state) {
+  const value = String(state || 'todo').toLowerCase();
+  const cls = value === 'done' ? 'wf-done' : value === 'pending' ? 'wf-pending' : value === 'failed' ? 'wf-failed' : 'wf-todo';
+  return `<span class="wf-cell ${cls}">${escHtml(value)}</span>`;
 }
 </script>
 </body>

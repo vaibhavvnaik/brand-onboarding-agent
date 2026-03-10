@@ -81,6 +81,33 @@ function buildCoworkPrompt(row) {
   ].filter(Boolean).join('\n');
 }
 
+function buildWorkflowStepStates(brand) {
+  const status = String(brand.onboardingStatus || '');
+  const failed = status === 'failed' || status === 'captcha_blocked';
+  const active = status === 'active';
+  const signupAttempted = Number(brand.signupAttempts || 0) > 0 || !!brand.lastSignupAttempt;
+  const submittedStates = new Set(['submitted', 'subscribing', 'awaiting_confirmation', 'confirmed', 'active']);
+  const confirmationSeen = !!brand.signupConfirmedAt || status === 'confirmed';
+  const newsletterSeen = !!brand.firstNewsletterAt || Number(brand.totalEmailsReceived || 0) > 0;
+
+  const donePendingFailed = (done, pending = false) => {
+    if (done) return 'done';
+    if (failed) return 'failed';
+    return pending ? 'pending' : 'todo';
+  };
+
+  return {
+    discovered: donePendingFailed(!!brand.discoveredAt || !!brand.createdAt, true),
+    signupAttempt: donePendingFailed(signupAttempted, status === 'discovered'),
+    signupSubmitted: donePendingFailed(submittedStates.has(status) || signupAttempted, signupAttempted && !submittedStates.has(status)),
+    welcomeEmail: donePendingFailed(!!brand.welcomeEmailReceived, status === 'awaiting_confirmation' || status === 'submitted' || status === 'subscribing'),
+    confirmation: donePendingFailed(confirmationSeen, !!brand.confirmationRequired && !confirmationSeen),
+    newsletterSeen: donePendingFailed(newsletterSeen, status === 'awaiting_confirmation' || status === 'confirmed'),
+    ingestion: donePendingFailed(Number(brand.totalEmailsReceived || 0) > 0, newsletterSeen),
+    active: active ? 'done' : (failed ? 'failed' : 'todo')
+  };
+}
+
 async function startWorkflowRun(step, meta = {}) {
   try {
     return await WorkflowRun.create({
@@ -464,6 +491,48 @@ router.get('/brands', async (req, res) => {
 
     res.json({ brands, pagination: { total, page: Number(page), limit: Number(limit), pages: Math.ceil(total / limit) } });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** GET /api/brands/workflow-matrix?limit=200&page=1&status=&search= */
+router.get('/brands/workflow-matrix', async (req, res) => {
+  try {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(Math.max(10, Number(req.query.limit || 200)), 1000);
+    const query = {};
+    if (req.query.status) query.onboardingStatus = String(req.query.status);
+    if (req.query.search) query.$text = { $search: String(req.query.search) };
+
+    const total = await Brand.countDocuments(query);
+    const brands = await Brand.find(query)
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .select('name domain websiteUrl onboardingStatus discoveredAt createdAt updatedAt signupAttempts lastSignupAttempt signupError signupFailureCode signupFailureCategory welcomeEmailReceived confirmationRequired signupConfirmedAt firstNewsletterAt totalEmailsReceived')
+      .lean();
+
+    const rows = brands.map((brand) => ({
+      brandId: String(brand._id),
+      name: brand.name || '',
+      domain: brand.domain || '',
+      websiteUrl: brand.websiteUrl || '',
+      onboardingStatus: brand.onboardingStatus || 'discovered',
+      updatedAt: brand.updatedAt || brand.createdAt || null,
+      steps: buildWorkflowStepStates(brand)
+    }));
+
+    res.json({
+      rows,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (err) {
+    logger.error('Failed to fetch workflow matrix', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /** GET /api/brands/failed-signup-queue?limit=500&days=30&format=json|csv */
