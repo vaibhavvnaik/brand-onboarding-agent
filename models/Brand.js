@@ -23,7 +23,10 @@ const SignupAttemptSchema = new mongoose.Schema({
   espDetected:    String,
   strategy:       String, // 'footer_form', 'popup', 'dedicated_page', 'esp_api'
   outcome:        { type: String, enum: ['success', 'failed', 'captcha', 'already_subscribed', 'timeout'] },
-  errorMessage:   String
+  errorMessage:   String,
+  failureCategory: String,
+  failureCode: String,
+  diagnostic: { type: mongoose.Schema.Types.Mixed, default: null }
 }, { _id: false });
 
 // --- Main Brand Schema -----------------------------------------
@@ -89,6 +92,11 @@ const BrandSchema = new mongoose.Schema({
   signupAttemptLog:   [SignupAttemptSchema],
   lastSignupAttempt:  Date,
   signupError:        String,
+  signupFailureCategory: String,
+  signupFailureCode: String,
+  signupFailureAt: Date,
+  signupFailureScreenshotPath: String,
+  signupFailureDiagnostic: { type: mongoose.Schema.Types.Mixed, default: null },
 
   // -- AI Categorization ------------------------------------------
   primaryCategory: {
@@ -145,7 +153,7 @@ const BrandSchema = new mongoose.Schema({
   },
 
   // -- Discovery Metadata ----------------------------------------
-  source:       { type: String, enum: ['milled.com', 'web_search', 'manual', 'referral', 'curated_seed'] },
+  source:       { type: String, enum: ['milled.com', 'web_search', 'manual', 'referral', 'curated_seed', 'claude_ai'] },
   sourceUrl:    String,
   discoveredAt: { type: Date, default: Date.now },
   milledFrequency: String, // How often they send (from milled.com)

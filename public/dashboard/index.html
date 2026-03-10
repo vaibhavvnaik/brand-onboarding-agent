@@ -361,6 +361,9 @@ function renderBrands(brands) {
       </div>
 
       ${b.description ? `<p class="text-xs text-slate-400 line-clamp-2 mb-3">${escHtml(b.description)}</p>` : ''}
+      ${(b.onboardingStatus === 'failed' || b.onboardingStatus === 'captcha_blocked') && b.signupFailureCategory
+        ? `<p class="text-xs text-red-300 mb-2">Failure: ${escHtml(b.signupFailureCategory)}${b.signupFailureCode ? ` / ${escHtml(b.signupFailureCode)}` : ''}</p>`
+        : ''}
 
       <div class="flex flex-wrap gap-1.5 mb-3">
         ${b.primaryCategory ? `<span class="text-xs bg-indigo-500/15 text-indigo-300 border border-indigo-500/20 px-2 py-0.5 rounded-full">${b.primaryCategory}</span>` : ''}
@@ -429,7 +432,27 @@ function buildModalContent(b) {
       ${infoRow('Total Emails', b.totalEmailsReceived || 0)}
       ${infoRow('Has Affiliate Program', b.hasAffiliateProgram ? '[OK] Yes' : '-')}
       ${infoRow('Est. Rev Share', b.estimatedRevShare || '-')}
+      ${infoRow('Signup Failure Category', b.signupFailureCategory || '-')}
+      ${infoRow('Signup Failure Code', b.signupFailureCode || '-')}
     </div>
+
+    ${(b.signupError || b.signupFailureCategory) ? `
+    <div class="glass rounded-xl p-4 mb-4 border border-red-500/20">
+      <p class="text-xs font-semibold text-red-300 uppercase tracking-wider mb-2">Signup Failure Diagnostics</p>
+      <p class="text-xs text-slate-300"><span class="text-slate-500">At:</span> ${b.signupFailureAt ? escHtml(fmtDate(b.signupFailureAt)) : '-'}</p>
+      <p class="text-xs text-slate-300 mt-1"><span class="text-slate-500">Error:</span> ${escHtml(b.signupError || '-')}</p>
+      ${(b.signupFailureDiagnostic && Array.isArray(b.signupFailureDiagnostic.attemptTrace) && b.signupFailureDiagnostic.attemptTrace.length)
+        ? `<div class="mt-2 pt-2 border-t border-white/10">
+            <p class="text-xs text-slate-500 mb-1">Strategy attempts:</p>
+            ${b.signupFailureDiagnostic.attemptTrace.map((a) =>
+              `<p class="text-xs text-slate-400">${escHtml(a.strategy || 'unknown')}  ${a.success ? 'success' : 'failed'}  ${a.durationMs || 0}ms${a.reason ? `  ${escHtml(a.reason)}` : ''}</p>`
+            ).join('')}
+          </div>`
+        : ''}
+      ${(b.signupFailureScreenshotPath)
+        ? `<div class="mt-2"><a target="_blank" class="text-xs text-indigo-300 hover:text-indigo-200 underline" href="/api/brands/${b._id}/signup-failure-screenshot">Open failure screenshot</a></div>`
+        : ''}
+    </div>` : ''}
 
     ${b.currentSenderEmail ? `
     <div class="glass rounded-xl p-4 mb-4">

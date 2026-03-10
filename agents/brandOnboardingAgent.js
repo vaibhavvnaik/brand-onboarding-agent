@@ -8,6 +8,7 @@ const { signUpForNewsletter } = require('../services/newsletterSignup');
 const { categorizeBrand } = require('../services/brandCategorizer');
 const { filterDuplicates } = require('../services/duplicateChecker');
 const { scanRecentEmails, detectStaleBrands } = require('../services/emailChangeDetector');
+const { classifySignupFailure } = require('../utils/signupFailure');
 const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -95,20 +96,41 @@ async function runFullOnboarding(batchSize, emit, getStopFlag) {
     brandDoc.signupAttemptLog.push({
       attemptedAt: new Date(), formUrl: signupResult.formUrl || brand.websiteUrl,
       espDetected: signupResult.espProvider, strategy: signupResult.strategy,
-      outcome: signupResult.success ? 'success' : 'failed', errorMessage: signupResult.error
+      outcome: signupResult.success ? 'success' : 'failed',
+      errorMessage: signupResult.error,
+      failureCategory: signupResult.failureCategory || null,
+      failureCode: signupResult.failureCode || null,
+      diagnostic: signupResult.attemptTrace || null
     });
     if (signupResult.espProvider && signupResult.espProvider !== 'unknown') brandDoc.espProvider = signupResult.espProvider;
     if (signupResult.formUrl) brandDoc.signupFormUrl = signupResult.formUrl;
     if (!signupResult.success) {
       stats.signupFailed++;
       const reason = signupResult.error || 'Unknown';
-      const status = reason.toLowerCase().includes('captcha') ? 'captcha_blocked' : 'failed';
+      const classified = classifySignupFailure(reason, signupResult.strategy);
+      const status = classified.category === 'captcha_blocked' ? 'captcha_blocked' : 'failed';
       brandDoc.signupError = reason;
+      brandDoc.signupFailureCategory = signupResult.failureCategory || classified.category;
+      brandDoc.signupFailureCode = signupResult.failureCode || classified.code;
+      brandDoc.signupFailureAt = new Date();
+      brandDoc.signupFailureScreenshotPath = signupResult.failureScreenshotPath || null;
+      brandDoc.signupFailureDiagnostic = {
+        websiteUrl: brand.websiteUrl,
+        attemptedStrategy: signupResult.strategy || null,
+        attemptTrace: signupResult.attemptTrace || [],
+        espProvider: signupResult.espProvider || 'unknown'
+      };
       await brandDoc.updateStatus(status, `Signup failed: ${reason}`);
       emit('warn', 'signup', `  [ERR] ${brand.name}: ${reason}`);
       await sleep(SIGNUP_DELAY);
       continue;
     }
+    brandDoc.signupError = null;
+    brandDoc.signupFailureCategory = null;
+    brandDoc.signupFailureCode = null;
+    brandDoc.signupFailureAt = null;
+    brandDoc.signupFailureScreenshotPath = null;
+    brandDoc.signupFailureDiagnostic = null;
     stats.signupSuccess++;
     emit('success', 'signup', `  [OK] ${brand.name}: submitted (${signupResult.strategy})`);
     await brandDoc.updateStatus('awaiting_confirmation', 'Waiting for async inbox worker');
