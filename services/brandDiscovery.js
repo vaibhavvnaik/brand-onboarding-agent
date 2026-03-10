@@ -5,6 +5,8 @@
  */
 const axios = require('axios');
 const cheerio = require('cheerio');
+const Anthropic = require('@anthropic-ai/sdk');
+const Config = require('../models/Config');
 const logger = require('../utils/logger');
 
 const BASE_HEADERS = {
@@ -16,6 +18,117 @@ const BASE_HEADERS = {
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+let anthropicClient = null;
+
+function getAnthropicClient() {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  return anthropicClient;
+}
+
+function normalizeDomain(domain = '') {
+  return String(domain).toLowerCase().trim().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+}
+
+function tierToScore(tier = '') {
+  const t = String(tier).toLowerCase();
+  if (t === 'luxury') return { quality: 9, affiliate: 8 };
+  if (t === 'premium') return { quality: 8, affiliate: 7 };
+  if (t === 'established') return { quality: 7, affiliate: 6 };
+  if (t === 'emerging') return { quality: 6, affiliate: 5 };
+  return { quality: 6, affiliate: 5 };
+}
+
+async function discoverBrandsWithClaude(limit, existingDomains = new Set()) {
+  const client = getAnthropicClient();
+  if (!client) {
+    logger.warn('[discovery] Claude discovery skipped: ANTHROPIC_API_KEY missing');
+    return [];
+  }
+
+  const history = await Config.get('claude_discovery_domains').catch(() => []) || [];
+  const blocked = new Set([
+    ...Array.from(existingDomains || []).map((d) => normalizeDomain(d)),
+    ...history.map((d) => normalizeDomain(d))
+  ]);
+
+  const avoidList = Array.from(blocked).filter(Boolean).slice(0, 220);
+  const prompt = `Return exactly ${limit} unique direct-to-consumer brands as JSON only.
+No markdown. No explanation.
+
+Output schema:
+[
+  {
+    "name": "Brand Name",
+    "domain": "example.com",
+    "websiteUrl": "https://www.example.com",
+    "primaryCategory": "one of Fashion & Apparel|Beauty & Skincare|Health & Wellness|Home & Living|Food & Beverage|Fitness & Sports|Outdoor & Adventure|Tech & Gadgets|Sustainable & Eco|Baby & Kids|Pets|Travel & Luggage|Jewelry & Watches|Personal Care & Grooming|Gifts & Novelty|Office & Stationery|Art & Craft|Other",
+    "brandTier": "emerging|established|premium|luxury|niche",
+    "reason": "short phrase"
+  }
+]
+
+Rules:
+- Real brands with active ecommerce websites.
+- Domain must be root domain only (no path, no www prefix).
+- Do not include marketplaces, publishers, or software tools.
+- Keep reason very short (max 12 words).
+- Never include any of these domains:
+${avoidList.join(', ') || '(none)'}
+`;
+
+  let results = [];
+  try {
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 900,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    const raw = (response.content?.[0]?.text || '').trim();
+    const jsonStr = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+    const arr = JSON.parse(jsonStr);
+    if (!Array.isArray(arr)) return [];
+
+    const seen = new Set();
+    for (const item of arr) {
+      const name = String(item?.name || '').trim();
+      const domain = normalizeDomain(item?.domain || item?.websiteUrl || '');
+      if (!name || !domain) continue;
+      if (blocked.has(domain) || seen.has(domain)) continue;
+      seen.add(domain);
+      const websiteUrl = item?.websiteUrl ? String(item.websiteUrl).trim() : `https://www.${domain}`;
+      const { quality, affiliate } = tierToScore(item?.brandTier);
+      results.push({
+        name,
+        domain,
+        websiteUrl,
+        description: String(item?.reason || '').trim(),
+        source: 'claude_ai',
+        sourceUrl: 'claude://brand-discovery',
+        primaryCategory: String(item?.primaryCategory || 'Other').trim(),
+        tier: String(item?.brandTier || 'established').trim().toLowerCase(),
+        qualityScore: quality,
+        affiliatePotentialScore: affiliate
+      });
+      if (results.length >= limit) break;
+    }
+  } catch (err) {
+    logger.warn(`[discovery] Claude discovery failed: ${err.message}`);
+    return [];
+  }
+
+  if (results.length) {
+    try {
+      const updatedHistory = Array.from(new Set([...history, ...results.map((r) => r.domain)])).slice(-1500);
+      await Config.set('claude_discovery_domains', updatedHistory);
+    } catch (err) {
+      logger.warn(`[discovery] Claude history persistence failed, continuing with fresh results: ${err.message}`);
+    }
+  }
+  logger.info(`[discovery] Claude generated ${results.length} candidate brands`);
+  return results;
+}
 
 // -- Milled.com Category Mapping --------------------------------
 // Maps our categories to milled.com's search terms
@@ -269,6 +382,33 @@ function scoreBrand(brand) {
 async function discoverBrands(limit = 20, existingDomains = new Set()) {
   logger.info(`\n Starting brand discovery - target: ${limit} brands`);
   const discovered = new Map(); // domain -> brand object, to deduplicate
+  const discoverySource = String(process.env.DISCOVERY_SOURCE || 'claude').toLowerCase();
+  const strictClaude = String(process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
+  const hasClaudeKey = !!process.env.ANTHROPIC_API_KEY;
+  const useClaude = discoverySource !== 'legacy';
+  const allowFallback = discoverySource !== 'claude_only' || !strictClaude;
+
+  if (useClaude) {
+    if (!hasClaudeKey) {
+      logger.warn('[discovery] ANTHROPIC_API_KEY missing; using fallback discovery sources');
+    }
+    const claudeBrands = await discoverBrandsWithClaude(limit, existingDomains);
+    for (const brand of claudeBrands) {
+      const cleanDomain = normalizeDomain(brand.domain);
+      if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+      discovered.set(cleanDomain, brand);
+    }
+    if (discovered.size >= limit) {
+      const result = Array.from(discovered.values()).slice(0, limit);
+      logger.info(`[OK] Discovery complete (Claude): returning ${result.length} brands`);
+      return result;
+    }
+    if (!allowFallback) {
+      const result = Array.from(discovered.values()).slice(0, limit);
+      logger.info(`[OK] Discovery complete (Claude-only): returning ${result.length} brands`);
+      return result;
+    }
+  }
 
   // -- 1. Start with curated seed brands ------------------------
   logger.info('Loading curated seed brands...');

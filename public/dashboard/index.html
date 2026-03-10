@@ -30,6 +30,12 @@
     .modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:50; backdrop-filter:blur(4px); }
     .modal.open { display:flex; align-items:center; justify-content:center; }
     input:focus, select:focus { outline:none; border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.2); }
+    .panel-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .panel-table thead th { text-align: left; color: #94a3b8; font-weight: 600; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .panel-table tbody td { padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); color: #cbd5e1; vertical-align: top; }
+    .panel-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+    .table-wrap { overflow-x: auto; max-height: 18rem; }
+    .mono-cell { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   </style>
 </head>
 <body class="min-h-screen">
@@ -159,37 +165,33 @@
 
 <!-- -- OPERATIONS ------------------------------------------------- -->
 <div class="max-w-screen-2xl mx-auto px-6 pb-4">
-  <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-    <div class="glass rounded-xl p-4">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-semibold text-slate-200">Persistent Activity Logs</h3>
-        <button onclick="loadActivityLogs()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
-      </div>
-      <div id="activityLogs" class="space-y-2 max-h-72 overflow-y-auto text-xs text-slate-300">
-        <div class="text-slate-500">Loading logs...</div>
-      </div>
-    </div>
-
-    <div class="glass rounded-xl p-4">
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-semibold text-slate-200">Ingested Newsletter Screenshots</h3>
-        <button onclick="loadNewsletterArtifacts()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
-      </div>
-      <div id="newsletterArtifacts" class="space-y-2 max-h-72 overflow-y-auto text-xs text-slate-300">
-        <div class="text-slate-500">Loading artifacts...</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div class="max-w-screen-2xl mx-auto px-6 pb-4">
-  <div class="glass rounded-xl p-4">
+  <div class="glass rounded-xl p-4 mb-4">
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-sm font-semibold text-slate-200">Workflow Step History</h3>
       <button onclick="loadWorkflowRuns()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
     </div>
-    <div id="workflowRuns" class="space-y-2 max-h-72 overflow-y-auto text-xs text-slate-300">
+    <div id="workflowRuns" class="text-xs text-slate-300">
       <div class="text-slate-500">Loading workflow history...</div>
+    </div>
+  </div>
+
+  <div class="glass rounded-xl p-4 mb-4">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm font-semibold text-slate-200">Persistent Activity Logs</h3>
+      <button onclick="loadActivityLogs()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
+    </div>
+    <div id="activityLogs" class="text-xs text-slate-300">
+      <div class="text-slate-500">Loading logs...</div>
+    </div>
+  </div>
+
+  <div class="glass rounded-xl p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm font-semibold text-slate-200">Ingested Newsletter Screenshots</h3>
+      <button onclick="loadNewsletterArtifacts()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
+    </div>
+    <div id="newsletterArtifacts" class="text-xs text-slate-300">
+      <div class="text-slate-500">Loading artifacts...</div>
     </div>
   </div>
 </div>
@@ -575,16 +577,32 @@ async function loadActivityLogs() {
       el.innerHTML = '<div class="text-slate-500">No logs yet.</div>';
       return;
     }
-    el.innerHTML = logs.map((log) => `
-      <div class="border border-white/10 rounded-lg px-3 py-2 bg-white/5">
-        <div class="flex items-center justify-between gap-2">
-          <span class="uppercase text-[10px] tracking-wide text-slate-400">${escHtml(log.level || 'info')}</span>
-          <span class="text-[10px] text-slate-500">${fmtDate(log.createdAt)}</span>
-        </div>
-        <div class="mt-1 text-slate-200">${escHtml(log.message || '')}</div>
-        <div class="mt-1 text-[10px] text-slate-500">${escHtml(log.phase || 'general')} · ${escHtml(log.source || 'runtime')}</div>
+    el.innerHTML = `
+      <div class="table-wrap">
+        <table class="panel-table min-w-[880px]">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Level</th>
+              <th>Phase</th>
+              <th>Source</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${logs.map((log) => `
+              <tr>
+                <td class="whitespace-nowrap">${fmtDate(log.createdAt)}</td>
+                <td class="uppercase">${escHtml(log.level || 'info')}</td>
+                <td>${escHtml(log.phase || 'general')}</td>
+                <td>${escHtml(log.source || 'runtime')}</td>
+                <td>${escHtml(log.message || '')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
       </div>
-    `).join('');
+    `;
   } catch (e) {
     el.innerHTML = `<div class="text-red-300">Failed to load logs: ${escHtml(e.message)}</div>`;
   }
@@ -604,22 +622,43 @@ async function loadNewsletterArtifacts() {
       el.innerHTML = '<div class="text-slate-500">No ingested newsletters found.</div>';
       return;
     }
-    el.innerHTML = rows.map((row) => `
-      <div class="border border-white/10 rounded-lg px-3 py-2 bg-white/5">
-        <div class="flex items-center justify-between gap-2">
-          <span class="badge-${statusClass(row.emailType === 'welcome' ? 'discovered' : 'active')} text-[10px] px-2 py-0.5 rounded-full">${escHtml(row.emailType || 'newsletter')}</span>
-          <span class="text-[10px] text-slate-500">${fmtDate(row.receivedAt)}</span>
-        </div>
-        <div class="mt-1 text-slate-200">${escHtml(row.subject || '(no subject)')}</div>
-        <div class="mt-1 text-[10px] text-slate-400">${escHtml((row.brand && row.brand.name) || 'Unresolved brand')} · ${escHtml(row.fromEmail || '')}</div>
-        <div class="mt-2">
-          ${row.screenshotUrl
-            ? `<a class="text-xs text-indigo-300 hover:text-indigo-200 underline" href="${row.screenshotUrl}" target="_blank">Open screenshot</a>`
-            : `<span class="text-xs text-slate-500">No screenshot available</span>`
-          }
-        </div>
+    el.innerHTML = `
+      <div class="table-wrap">
+        <table class="panel-table min-w-[980px]">
+          <thead>
+            <tr>
+              <th>Received</th>
+              <th>Type</th>
+              <th>Brand</th>
+              <th>From</th>
+              <th>Subject</th>
+              <th>Screenshot</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td class="whitespace-nowrap">${fmtDate(row.receivedAt)}</td>
+                <td>
+                  <span class="badge-${statusClass(row.emailType === 'welcome' ? 'discovered' : 'active')} text-[10px] px-2 py-0.5 rounded-full">
+                    ${escHtml(row.emailType || 'newsletter')}
+                  </span>
+                </td>
+                <td>${escHtml((row.brand && row.brand.name) || 'Unresolved brand')}</td>
+                <td class="mono-cell">${escHtml(row.fromEmail || '')}</td>
+                <td>${escHtml(row.subject || '(no subject)')}</td>
+                <td>
+                  ${row.screenshotUrl
+                    ? `<a class="text-xs text-indigo-300 hover:text-indigo-200 underline" href="${row.screenshotUrl}" target="_blank">Open</a>`
+                    : `<span class="text-xs text-slate-500">None</span>`
+                  }
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
       </div>
-    `).join('');
+    `;
   } catch (e) {
     el.innerHTML = `<div class="text-red-300">Failed to load artifacts: ${escHtml(e.message)}</div>`;
   }
@@ -640,27 +679,45 @@ async function loadWorkflowRuns() {
       el.innerHTML = '<div class="text-slate-500">No workflow runs yet.</div>';
       return;
     }
-    el.innerHTML = stepRuns.map((row) => {
-      const sum = row.summary || {};
-      const stats = [];
-      if (typeof sum.processed === 'number') stats.push(`processed: ${sum.processed}`);
-      if (typeof sum.matched === 'number') stats.push(`matched: ${sum.matched}`);
-      if (typeof sum.ingested === 'number') stats.push(`ingested: ${sum.ingested}`);
-      if (typeof sum.confirmed === 'number') stats.push(`confirmed: ${sum.confirmed}`);
-      if (typeof sum.signupSuccess === 'number') stats.push(`signup ok: ${sum.signupSuccess}`);
-      if (typeof sum.signupFailed === 'number') stats.push(`signup failed: ${sum.signupFailed}`);
-      const statusColor = row.status === 'success' ? 'text-emerald-300' : row.status === 'failed' ? 'text-red-300' : 'text-amber-300';
-      return `
-      <div class="border border-white/10 rounded-lg px-3 py-2 bg-white/5">
-        <div class="flex items-center justify-between gap-2">
-          <span class="uppercase text-[10px] tracking-wide ${statusColor}">${escHtml(row.status || 'running')}</span>
-          <span class="text-[10px] text-slate-500">${fmtDate(row.startedAt)}</span>
-        </div>
-        <div class="mt-1 text-slate-200">${escHtml(row.step || '')}</div>
-        <div class="mt-1 text-[10px] text-slate-400">${stats.length ? escHtml(stats.join(' · ')) : 'no summary metrics'}</div>
-        <div class="mt-1 text-[10px] text-slate-500">duration: ${row.durationMs ? `${Math.round(row.durationMs / 1000)}s` : '-'}</div>
-      </div>`;
-    }).join('');
+    el.innerHTML = `
+      <div class="table-wrap">
+        <table class="panel-table min-w-[980px]">
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Step</th>
+              <th>Status</th>
+              <th>Duration</th>
+              <th>Summary</th>
+              <th>Error</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${stepRuns.map((row) => {
+              const sum = row.summary || {};
+              const stats = [];
+              if (typeof sum.processed === 'number') stats.push(`processed: ${sum.processed}`);
+              if (typeof sum.matched === 'number') stats.push(`matched: ${sum.matched}`);
+              if (typeof sum.ingested === 'number') stats.push(`ingested: ${sum.ingested}`);
+              if (typeof sum.confirmed === 'number') stats.push(`confirmed: ${sum.confirmed}`);
+              if (typeof sum.signupSuccess === 'number') stats.push(`signup ok: ${sum.signupSuccess}`);
+              if (typeof sum.signupFailed === 'number') stats.push(`signup failed: ${sum.signupFailed}`);
+              const statusColor = row.status === 'success' ? 'text-emerald-300' : row.status === 'failed' ? 'text-red-300' : 'text-amber-300';
+              return `
+                <tr>
+                  <td class="whitespace-nowrap">${fmtDate(row.startedAt)}</td>
+                  <td class="mono-cell">${escHtml(row.step || '')}</td>
+                  <td class="uppercase ${statusColor}">${escHtml(row.status || 'running')}</td>
+                  <td>${row.durationMs ? `${Math.round(row.durationMs / 1000)}s` : '-'}</td>
+                  <td>${stats.length ? escHtml(stats.join(' | ')) : 'no summary metrics'}</td>
+                  <td>${escHtml(row.error || '-')}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
   } catch (e) {
     el.innerHTML = `<div class="text-red-300">Failed to load workflow history: ${escHtml(e.message)}</div>`;
   }
