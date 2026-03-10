@@ -18,6 +18,12 @@ function classifySignupFailure(errorMessage = '', strategy = null) {
   if (msg.includes('captcha') || msg.includes('hcaptcha') || msg.includes('recaptcha')) {
     return { category: 'captcha_blocked', code: 'captcha_detected' };
   }
+  if (msg.includes('cloudflare challenge page blocked automated access') || msg.includes('cloudflare_challenge_page')) {
+    return { category: 'bot_blocked', code: 'cloudflare_challenge_page' };
+  }
+  if (msg.includes('site waitroom page prevented homepage/form access') || msg.includes('site_waitroom_page')) {
+    return { category: 'site_unavailable', code: 'site_waitroom_page' };
+  }
   if (msg.includes('no signup form found')) {
     return { category: 'no_form_detected', code: 'all_strategies_exhausted' };
   }

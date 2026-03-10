@@ -177,6 +177,24 @@
 
   <div class="glass rounded-xl p-4 mb-4">
     <div class="flex items-center justify-between mb-3">
+      <div>
+        <h3 class="text-sm font-semibold text-slate-200">Manual Signup Queue (Cowork Export)</h3>
+        <p class="text-[11px] text-slate-500 mt-1">Failed/captcha-blocked brands with metadata for bulk manual signup handoff.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="loadFailedSignupQueue()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
+        <button onclick="copyFailedQueueJSON()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Copy JSON</button>
+        <button onclick="copyCoworkPrompts()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Copy Cowork Prompt</button>
+        <a href="/api/brands/failed-signup-queue?format=csv&limit=500&days=30" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Download CSV</a>
+      </div>
+    </div>
+    <div id="failedSignupQueue" class="text-xs text-slate-300">
+      <div class="text-slate-500">Loading manual signup queue...</div>
+    </div>
+  </div>
+
+  <div class="glass rounded-xl p-4 mb-4">
+    <div class="flex items-center justify-between mb-3">
       <h3 class="text-sm font-semibold text-slate-200">Persistent Activity Logs</h3>
       <button onclick="loadActivityLogs()" class="text-xs px-2 py-1 glass rounded hover:bg-white/10">Refresh</button>
     </div>
@@ -266,6 +284,7 @@ let currentPage = 1;
 let currentFilters = {};
 let searchTimer = null;
 let agentPollTimer = null;
+let failedSignupQueueRows = [];
 
 // -- Init --------------------------------------------------------
 document.addEventListener('DOMContentLoaded', () => {
@@ -275,6 +294,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadActivityLogs();
   loadNewsletterArtifacts();
   loadWorkflowRuns();
+  loadFailedSignupQueue();
 });
 
 // -- Stats -------------------------------------------------------
@@ -743,6 +763,94 @@ async function loadWorkflowRuns() {
     `;
   } catch (e) {
     el.innerHTML = `<div class="text-red-300">Failed to load workflow history: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function loadFailedSignupQueue() {
+  const el = document.getElementById('failedSignupQueue');
+  if (!el) return;
+  el.innerHTML = '<div class="text-slate-500">Loading manual signup queue...</div>';
+  failedSignupQueueRows = [];
+  try {
+    const res = await fetch('/api/brands/failed-signup-queue?limit=500&days=30');
+    if (res.status === 401) { window.location.href = '/dashboard/login'; return; }
+    if (!res.ok) throw new Error(`Failed signup queue request failed: ${res.status}`);
+    const data = await res.json();
+    const rows = data.rows || [];
+    failedSignupQueueRows = rows;
+    if (!rows.length) {
+      el.innerHTML = '<div class="text-slate-500">No failed signup queue rows found in the selected window.</div>';
+      return;
+    }
+
+    const summaryText = Object.entries(data.summaryByCode || {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join(' | ');
+
+    el.innerHTML = `
+      <div class="mb-2 text-[11px] text-slate-500">Rows: ${rows.length}${summaryText ? ` | ${escHtml(summaryText)}` : ''}</div>
+      <div class="table-wrap">
+        <table class="panel-table min-w-[1200px]">
+          <thead>
+            <tr>
+              <th>Brand</th>
+              <th>Website</th>
+              <th>Failure</th>
+              <th>Recommended Action</th>
+              <th>Category/Tier</th>
+              <th>Last Failure</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>
+                  <div class="font-semibold">${escHtml(row.name || '')}</div>
+                  <div class="text-[10px] text-slate-500 mono-cell">${escHtml(row.domain || '')}</div>
+                </td>
+                <td class="mono-cell">
+                  <a class="text-indigo-300 hover:text-indigo-200 underline" href="${escHtml(row.websiteUrl || '')}" target="_blank">${escHtml(row.websiteUrl || '')}</a>
+                </td>
+                <td>
+                  <div>${escHtml(row.signupFailureCategory || 'unknown')} / ${escHtml(row.signupFailureCode || 'unknown')}</div>
+                  <div class="text-[10px] text-slate-500">${escHtml(row.latestAttemptReason || row.signupError || '')}</div>
+                </td>
+                <td class="mono-cell">${escHtml(row.recommendedAction || 'manual_review_required')}</td>
+                <td>${escHtml(row.primaryCategory || '-')} / ${escHtml(row.brandTier || '-')}</td>
+                <td class="whitespace-nowrap">${row.signupFailureAt ? escHtml(fmtDate(row.signupFailureAt)) : '-'}</td>
+                <td>${escHtml(row.notes || '-')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="text-red-300">Failed to load manual signup queue: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function copyFailedQueueJSON() {
+  if (!failedSignupQueueRows.length) return;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(failedSignupQueueRows, null, 2));
+    alert(`Copied ${failedSignupQueueRows.length} queue rows to clipboard as JSON`);
+  } catch (e) {
+    alert(`Copy failed: ${e.message}`);
+  }
+}
+
+async function copyCoworkPrompts() {
+  if (!failedSignupQueueRows.length) return;
+  const text = failedSignupQueueRows
+    .map((row, idx) => `### Task ${idx + 1}\n${row.coworkPrompt || ''}`)
+    .join('\n\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    alert(`Copied ${failedSignupQueueRows.length} cowork prompts to clipboard`);
+  } catch (e) {
+    alert(`Copy failed: ${e.message}`);
   }
 }
 

@@ -43,6 +43,42 @@ function pushLog(entry) {
   });
 }
 
+function csvEscape(value) {
+  const str = String(value ?? '');
+  if (!str.includes('"') && !str.includes(',') && !str.includes('\n')) return str;
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
+function recommendedManualAction(brand) {
+  const code = String(brand.signupFailureCode || '').toLowerCase();
+  const category = String(brand.signupFailureCategory || '').toLowerCase();
+  if (code === 'captcha_challenge_present' || category === 'captcha_blocked') return 'manual_browser_signup_captcha';
+  if (code === 'cloudflare_challenge_page') return 'manual_browser_signup_cloudflare';
+  if (code === 'site_waitroom_page') return 'retry_later_waitroom_then_signup';
+  if (code === 'all_strategies_exhausted') return 'manual_form_hunt_and_submit';
+  return 'manual_review_required';
+}
+
+function compactAttemptSummary(brand) {
+  const trace = brand?.signupFailureDiagnostic?.attemptTrace;
+  if (!Array.isArray(trace) || !trace.length) return '';
+  return trace
+    .map((a) => `${a.strategy || 'unknown'}:${a.success ? 'ok' : 'fail'}${a.reason ? `:${a.reason}` : ''}`)
+    .join(' | ');
+}
+
+function buildCoworkPrompt(row) {
+  return [
+    `Brand: ${row.name}`,
+    `Website: ${row.websiteUrl}`,
+    `Target email: ${row.subscriptionEmail}`,
+    `Failure: ${row.signupFailureCategory}${row.signupFailureCode ? `/${row.signupFailureCode}` : ''}`,
+    `Action: ${row.recommendedAction}`,
+    row.signupFormUrl ? `Last form URL: ${row.signupFormUrl}` : 'Last form URL: unknown',
+    row.latestAttemptReason ? `Latest attempt reason: ${row.latestAttemptReason}` : ''
+  ].filter(Boolean).join('\n');
+}
+
 async function startWorkflowRun(step, meta = {}) {
   try {
     return await WorkflowRun.create({
@@ -399,6 +435,97 @@ router.get('/brands', async (req, res) => {
 
     res.json({ brands, pagination: { total, page: Number(page), limit: Number(limit), pages: Math.ceil(total / limit) } });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/** GET /api/brands/failed-signup-queue?limit=500&days=30&format=json|csv */
+router.get('/brands/failed-signup-queue', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 500), 5000);
+    const days = Math.min(Number(req.query.days || 30), 365);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const query = {
+      onboardingStatus: { $in: ['failed', 'captcha_blocked'] },
+      signupFailureAt: { $gte: since },
+      signupFailureCategory: { $exists: true, $ne: null }
+    };
+    if (req.query.category) query.signupFailureCategory = String(req.query.category);
+    if (req.query.code) query.signupFailureCode = String(req.query.code);
+
+    const brands = await Brand.find(query)
+      .sort({ signupFailureAt: -1, updatedAt: -1 })
+      .limit(limit)
+      .select('name domain websiteUrl subscriptionEmail onboardingStatus primaryCategory brandTier priceRange qualityScore affiliatePotentialScore source espProvider signupFormUrl signupError signupFailureCategory signupFailureCode signupFailureAt signupFailureScreenshotPath signupFailureDiagnostic signupAttemptLog notes affiliateSignupUrl lastSignupAttempt')
+      .lean();
+
+    const rows = brands.map((brand) => {
+      const attempts = Array.isArray(brand.signupAttemptLog) ? brand.signupAttemptLog : [];
+      const lastAttempt = attempts.length ? attempts[attempts.length - 1] : null;
+      const row = {
+        brandId: String(brand._id),
+        name: brand.name || '',
+        domain: brand.domain || '',
+        websiteUrl: brand.websiteUrl || `https://${brand.domain || ''}`,
+        subscriptionEmail: brand.subscriptionEmail || '',
+        onboardingStatus: brand.onboardingStatus || '',
+        primaryCategory: brand.primaryCategory || '',
+        brandTier: brand.brandTier || '',
+        priceRange: brand.priceRange || '',
+        qualityScore: brand.qualityScore ?? '',
+        affiliatePotentialScore: brand.affiliatePotentialScore ?? '',
+        source: brand.source || '',
+        espProvider: brand.espProvider || '',
+        signupFormUrl: brand.signupFormUrl || '',
+        signupFailureCategory: brand.signupFailureCategory || '',
+        signupFailureCode: brand.signupFailureCode || '',
+        signupError: brand.signupError || '',
+        signupFailureAt: brand.signupFailureAt || null,
+        latestAttemptStrategy: lastAttempt?.strategy || '',
+        latestAttemptReason: lastAttempt?.errorMessage || '',
+        attemptSummary: compactAttemptSummary(brand),
+        recommendedAction: recommendedManualAction(brand),
+        affiliateSignupUrl: brand.affiliateSignupUrl || '',
+        notes: brand.notes || '',
+        screenshotUrl: brand.signupFailureScreenshotPath ? `/api/brands/${brand._id}/signup-failure-screenshot` : null
+      };
+      return { ...row, coworkPrompt: buildCoworkPrompt(row) };
+    });
+
+    if (String(req.query.format || '').toLowerCase() === 'csv') {
+      const headers = [
+        'brandId', 'name', 'domain', 'websiteUrl', 'subscriptionEmail',
+        'onboardingStatus', 'primaryCategory', 'brandTier', 'priceRange',
+        'qualityScore', 'affiliatePotentialScore', 'source', 'espProvider',
+        'signupFormUrl', 'signupFailureCategory', 'signupFailureCode',
+        'signupError', 'signupFailureAt', 'latestAttemptStrategy', 'latestAttemptReason',
+        'attemptSummary', 'recommendedAction', 'affiliateSignupUrl', 'notes', 'screenshotUrl'
+      ];
+      const csv = [
+        headers.join(','),
+        ...rows.map((row) => headers.map((h) => csvEscape(row[h])).join(','))
+      ].join('\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename=\"failed-signup-queue-${new Date().toISOString().slice(0, 10)}.csv\"`);
+      return res.send(csv);
+    }
+
+    const summaryByCode = rows.reduce((acc, row) => {
+      const key = `${row.signupFailureCategory || 'unknown'}:${row.signupFailureCode || 'unknown'}`;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      count: rows.length,
+      filters: { limit, days, category: req.query.category || null, code: req.query.code || null },
+      summaryByCode,
+      rows
+    });
+  } catch (err) {
+    logger.error('Failed to fetch failed signup queue', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/brands/stats', async (req, res) => {

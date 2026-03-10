@@ -70,11 +70,58 @@ function hasCaptchaFailure(attemptTrace = []) {
   return (attemptTrace || []).some((attempt) => String(attempt?.reason || '').toLowerCase().includes('captcha'));
 }
 
+function findAttemptByReason(attemptTrace = [], reason) {
+  return (attemptTrace || []).find((attempt) => String(attempt?.reason || '').toLowerCase() === String(reason || '').toLowerCase());
+}
+
 function isPotentialCaptchaState(state = {}) {
   if (!state || typeof state !== 'object') return false;
   const hasMarker = !!(state.hasHcaptchaContainer || state.hasHCaptchaInput || state.hasRecaptchaInput || state.hasCaptchaIframe || state.hcaptchaBound || state.recaptchaBound);
   const tokenMissing = Number(state.hCaptchaValueLen || 0) === 0 && Number(state.recaptchaValueLen || 0) === 0;
   return hasMarker && tokenMissing;
+}
+
+async function detectSiteBlocker(page) {
+  try {
+    const [titleRaw, bodyRaw] = await Promise.all([
+      page.title().catch(() => ''),
+      page.textContent('body').catch(() => '')
+    ]);
+    const title = String(titleRaw || '').toLowerCase();
+    const body = String(bodyRaw || '').toLowerCase();
+    const snippet = body.slice(0, 400);
+
+    if (
+      title.includes('just a moment') ||
+      body.includes('enable javascript and cookies to continue') ||
+      body.includes('cf_chl') ||
+      body.includes('cdn-cgi/challenge-platform')
+    ) {
+      return {
+        reason: 'cloudflare_challenge_page',
+        message: 'Cloudflare challenge page blocked automated access',
+        diagnostic: { title: titleRaw || '', url: page.url(), snippet }
+      };
+    }
+
+    if (
+      title.includes('hang tight') ||
+      body.includes('routing to checkout') ||
+      body.includes('sit tight') ||
+      body.includes('waitroomform') ||
+      body.includes('automatically refresh and bring you into the website')
+    ) {
+      return {
+        reason: 'site_waitroom_page',
+        message: 'Site waitroom page prevented homepage/form access',
+        diagnostic: { title: titleRaw || '', url: page.url(), snippet }
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // -- Main Signup Function (with hard 3-min timeout) ------------
@@ -270,7 +317,16 @@ async function _signUpCore(websiteUrl, brandName) {
       }
     }
 
-    if (hasCaptchaFailure(result.attemptTrace)) {
+    const cloudflareBlock = findAttemptByReason(result.attemptTrace, 'cloudflare_challenge_page');
+    const waitroomBlock = findAttemptByReason(result.attemptTrace, 'site_waitroom_page');
+
+    if (cloudflareBlock) {
+      logger.info(`[EMAIL] ${brandName}: Cloudflare challenge blocked automated access`);
+      result.error = 'Cloudflare challenge page blocked automated access';
+    } else if (waitroomBlock) {
+      logger.info(`[EMAIL] ${brandName}: site waitroom page blocked signup form access`);
+      result.error = 'Site waitroom page prevented homepage/form access';
+    } else if (hasCaptchaFailure(result.attemptTrace)) {
       logger.info(`[EMAIL] ${brandName}: all strategies exhausted, captcha challenge blocked automation`);
       result.error = 'CAPTCHA challenge blocked automated submission';
     } else {
@@ -433,6 +489,8 @@ async function tryDedicatedSignupPage(page, baseUrl, profile, brandName) {
       const res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 12000 });
       if (!res || res.status() >= 400) continue;
       await sleep(1500);
+      const blocker = await detectSiteBlocker(page);
+      if (blocker) return { success: false, reason: blocker.reason, diagnostic: blocker.diagnostic };
       const filled = await fillEmailForm(page, profile, brandName);
       if (filled.success) {
         return { success: true, formUrl: url, espProvider: detectFromHtml(await page.content()) };
@@ -451,6 +509,8 @@ async function tryFooterForm(page, websiteUrl, profile, brandName) {
   try {
     await page.goto(websiteUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await sleep(1200);
+    const initialBlocker = await detectSiteBlocker(page);
+    if (initialBlocker) return { success: false, reason: initialBlocker.reason, diagnostic: initialBlocker.diagnostic };
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       await dismissOverlays(page);
@@ -462,6 +522,8 @@ async function tryFooterForm(page, websiteUrl, profile, brandName) {
         window.scrollTo(0, Math.floor(document.body.scrollHeight * ratio));
       }, attempt);
       await sleep(1000);
+      const blocker = await detectSiteBlocker(page);
+      if (blocker) return { success: false, reason: blocker.reason, diagnostic: blocker.diagnostic };
 
       const emailInput = await findEmailInput(page, { preferFooter: true, requireNewsletterContext: true });
       if (!emailInput) continue;
@@ -486,6 +548,8 @@ async function tryPopupForm(page, websiteUrl, profile, brandName) {
       await page.goto(websiteUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     }
     await sleep(2000);
+    const initialBlocker = await detectSiteBlocker(page);
+    if (initialBlocker) return { success: false, reason: initialBlocker.reason, diagnostic: initialBlocker.diagnostic };
     await page.mouse.move(640, 400);
     await sleep(500);
     await page.mouse.move(640, 100);
@@ -496,6 +560,8 @@ async function tryPopupForm(page, websiteUrl, profile, brandName) {
     await sleep(1500);
     await dismissOverlays(page);
     await sleep(700);
+    const blocker = await detectSiteBlocker(page);
+    if (blocker) return { success: false, reason: blocker.reason, diagnostic: blocker.diagnostic };
 
     const emailInput = await findEmailInput(page, { requireNewsletterContext: true });
     if (!emailInput) return { success: false, reason: 'popup_email_input_not_found' };
@@ -520,8 +586,12 @@ async function tryContextualForm(page, websiteUrl, profile, brandName) {
       await page.goto(websiteUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await sleep(1800);
     }
+    const initialBlocker = await detectSiteBlocker(page);
+    if (initialBlocker) return { success: false, reason: initialBlocker.reason, diagnostic: initialBlocker.diagnostic };
     await dismissOverlays(page);
     await sleep(600);
+    const blocker = await detectSiteBlocker(page);
+    if (blocker) return { success: false, reason: blocker.reason, diagnostic: blocker.diagnostic };
     const emailInput = await findEmailInput(page, { requireNewsletterContext: true });
     if (!emailInput) return { success: false, reason: 'contextual_email_input_not_found' };
     const fillResult = await fillEmailForm(page, profile, brandName, emailInput);
