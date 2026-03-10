@@ -18,6 +18,58 @@ function getClient() {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+function stripCodeFences(text = '') {
+  return String(text || '').replace(/^```(?:json)?\n?/im, '').replace(/\n?```$/im, '').trim();
+}
+
+function extractBalancedJson(text = '', open = '[', close = ']') {
+  const src = String(text || '');
+  const start = src.indexOf(open);
+  if (start < 0) return null;
+  let depth = 0;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === open) depth += 1;
+    if (ch === close) {
+      depth -= 1;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  const last = src.lastIndexOf(close);
+  return last > start ? src.slice(start, last + 1) : null;
+}
+
+function parseJsonFromModel(raw = '', mode = 'array') {
+  const cleaned = stripCodeFences(raw);
+  const candidates = [];
+
+  if (mode === 'array') {
+    const arr = extractBalancedJson(cleaned, '[', ']');
+    if (arr) candidates.push(arr);
+    candidates.push(cleaned);
+  } else {
+    const obj = extractBalancedJson(cleaned, '{', '}');
+    if (obj) candidates.push(obj);
+    candidates.push(cleaned);
+  }
+
+  let lastErr;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch (err) {
+      try {
+        const repaired = candidate.replace(/,\s*([}\]])/g, '$1');
+        return JSON.parse(repaired);
+      } catch (repairErr) {
+        lastErr = repairErr;
+      }
+    }
+  }
+  throw lastErr || new Error('Unable to parse model JSON');
+}
+
 function normalizeCategorizationPayload(brand, data = {}) {
   const base = getDefaultCategorization(brand);
   const merged = { ...base, ...(data || {}) };
@@ -99,11 +151,7 @@ Constraints:
     logger.info(`[llm] phase=categorize_single brand=${brand.name} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
     const raw = response.content[0].text.trim();
-
-    // Strip any markdown code fences if present
-    const jsonStr = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
-
-    const parsedData = JSON.parse(jsonStr);
+    const parsedData = parseJsonFromModel(raw, 'object');
     const data = normalizeCategorizationPayload(brand, parsedData);
 
     // Validate required fields
@@ -149,7 +197,7 @@ index|name|domain|website|description|tags
 ${brandsList}
 
 Each array item must include:
-primaryCategory,categories,productTypes,tags,lifestyleTags,targetDemographic,genderFocus,priceRange,brandTier,audienceSize,businessModel,affiliateNetworks,hasAffiliateProgram,estimatedRevShare,qualityScore,affiliatePotentialScore,description
+index,primaryCategory,categories,productTypes,tags,lifestyleTags,targetDemographic,genderFocus,priceRange,brandTier,audienceSize,businessModel,affiliateNetworks,hasAffiliateProgram,estimatedRevShare,qualityScore,affiliatePotentialScore,description
 
 Constraints:
 - categories 1-3
@@ -158,31 +206,38 @@ Constraints:
 - lifestyleTags 0-3
 - targetDemographic 1-4
 - affiliateNetworks 0-3
-- description max 12 words`;
+- description max 8 words
+- index must match input index`;
 
   const response = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: Math.min(1100, 180 + brands.length * 110),
+    max_tokens: Math.min(2200, 260 + brands.length * 230),
     messages: [{ role: 'user', content: prompt }]
   });
   logger.info(`[llm] phase=categorize_batch count=${brands.length} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
   const raw = response.content[0].text.trim();
-  // Strip any markdown code fences if present
-  const jsonStr = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
-  const dataArray = JSON.parse(jsonStr);
+  const dataArray = parseJsonFromModel(raw, 'array');
 
-  if (!Array.isArray(dataArray) || dataArray.length !== brands.length) {
-    throw new Error(`Expected array of ${brands.length}, got ${Array.isArray(dataArray) ? dataArray.length : typeof dataArray}`);
+  if (!Array.isArray(dataArray) || !dataArray.length) {
+    throw new Error(`Expected non-empty array, got ${Array.isArray(dataArray) ? dataArray.length : typeof dataArray}`);
   }
 
-  return dataArray.map((data, i) => {
-    if (!data.primaryCategory || !data.qualityScore) {
-      logger.warn(`    Incomplete data for ${brands[i].name}, using defaults`);
-      return { success: false, data: getDefaultCategorization(brands[i]), error: 'Missing required fields' };
+  const byIndex = new Map();
+  dataArray.forEach((item, pos) => {
+    const idx = Number(item?.index);
+    const normalizedIdx = Number.isInteger(idx) && idx >= 1 && idx <= brands.length ? idx - 1 : pos;
+    if (!byIndex.has(normalizedIdx)) byIndex.set(normalizedIdx, item);
+  });
+
+  return brands.map((brand, i) => {
+    const data = byIndex.get(i) || dataArray[i];
+    if (!data || !data.primaryCategory || typeof data.qualityScore !== 'number') {
+      logger.warn(`    Incomplete data for ${brand.name}, using defaults`);
+      return { success: false, data: getDefaultCategorization(brand), error: 'Missing required fields' };
     }
-    logger.info(`    ${brands[i].name} -> ${data.primaryCategory} | Q:${data.qualityScore}/10 | A:${data.affiliatePotentialScore}/10`);
-    return { success: true, data: normalizeCategorizationPayload(brands[i], data) };
+    logger.info(`    ${brand.name} -> ${data.primaryCategory} | Q:${data.qualityScore}/10 | A:${data.affiliatePotentialScore}/10`);
+    return { success: true, data: normalizeCategorizationPayload(brand, data) };
   });
 }
 
@@ -194,7 +249,33 @@ Constraints:
 async function categorizeBrands(brands) {
   logger.info(`\n  Categorizing ${brands.length} brands with AI...`);
   const results = [];
-  const BATCH_SIZE = Math.max(2, Math.min(12, parseInt(process.env.CATEGORIZER_BATCH_SIZE || '8', 10)));
+  const BATCH_SIZE = Math.max(2, Math.min(12, parseInt(process.env.CATEGORIZER_BATCH_SIZE || '6', 10)));
+
+  async function processBatch(batch, label) {
+    try {
+      const batchResults = await categorizeBrandBatch(batch);
+      return batch.map((brand, idx) => ({ brand, ...batchResults[idx] }));
+    } catch (err) {
+      if (batch.length <= 2) {
+        logger.warn(`  ${label} failed (${err.message}), falling back to individual calls...`);
+        const fallback = [];
+        for (const brand of batch) {
+          const result = await categorizeBrand(brand);
+          fallback.push({ brand, ...result });
+          await sleep(250);
+        }
+        return fallback;
+      }
+
+      const mid = Math.ceil(batch.length / 2);
+      const left = batch.slice(0, mid);
+      const right = batch.slice(mid);
+      logger.warn(`  ${label} failed (${err.message}), retrying split ${left.length}+${right.length}...`);
+      const leftResults = await processBatch(left, `${label}A`);
+      const rightResults = await processBatch(right, `${label}B`);
+      return [...leftResults, ...rightResults];
+    }
+  }
 
   for (let i = 0; i < brands.length; i += BATCH_SIZE) {
     const batch = brands.slice(i, i + BATCH_SIZE);
@@ -202,17 +283,8 @@ async function categorizeBrands(brands) {
     const totalBatches = Math.ceil(brands.length / BATCH_SIZE);
     logger.info(`  Batch ${batchNum}/${totalBatches}: [${batch.map(b => b.name).join(', ')}]`);
 
-    try {
-      const batchResults = await categorizeBrandBatch(batch);
-      batchResults.forEach((result, j) => results.push({ brand: batch[j], ...result }));
-    } catch (err) {
-      logger.warn(`  Batch ${batchNum} failed (${err.message}), falling back to individual calls...`);
-      for (const brand of batch) {
-        const result = await categorizeBrand(brand);
-        results.push({ brand, ...result });
-        await sleep(300);
-      }
-    }
+    const batchResults = await processBatch(batch, `Batch ${batchNum}`);
+    batchResults.forEach((row) => results.push(row));
 
     if (i + BATCH_SIZE < brands.length) await sleep(500);
   }

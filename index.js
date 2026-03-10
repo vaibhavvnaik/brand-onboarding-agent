@@ -15,6 +15,7 @@ process.on('unhandledRejection', (reason, promise) => {
 require('dotenv').config();
 const express   = require('express');
 const session   = require('express-session');
+const MongoStore = require('connect-mongo');
 const helmet    = require('helmet');
 const cors      = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -157,6 +158,30 @@ function logDiscoveryRuntimeConfig() {
   }
 }
 
+function createSessionMiddleware() {
+  const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+  const sessionConfig = {
+    secret: process.env.SESSION_SECRET || 'brand-agent-secret',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      secure: isProduction,
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000
+    }
+  };
+
+  if (isProduction && process.env.MONGODB_URI) {
+    sessionConfig.store = MongoStore.create({
+      mongoUrl: process.env.MONGODB_URI,
+      collectionName: 'sessions',
+      ttl: 24 * 60 * 60
+    });
+  }
+
+  return session(sessionConfig);
+}
+
 // -- Main --------------------------------------------------------
 (async () => {
   try {
@@ -189,17 +214,8 @@ function logDiscoveryRuntimeConfig() {
     app.use(express.urlencoded({ extended: true }));
     app.use('/artifacts', express.static(path.join(__dirname, 'artifacts'), { maxAge: '7d' }));
 
-    // Session (in-memory store - safe when MongoDB is unavailable)
-    app.use(session({
-      secret: process.env.SESSION_SECRET || 'brand-agent-secret',
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: process.env.NODE_ENV === 'production',
-        httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000
-      }
-    }));
+    // Session
+    app.use(createSessionMiddleware());
 
 // Trust Railway's proxy headers (fixes express-rate-limit ValidationError)
     app.set('trust proxy', 1);
@@ -265,7 +281,7 @@ function logDiscoveryRuntimeConfig() {
       .then(() => {
         logger.info('MongoDB connected successfully');
         logDiscoveryRuntimeConfig();
-        ensurePlaywrightRuntimeReady({ autoInstall: true }).then((runtime) => {
+        ensurePlaywrightRuntimeReady().then((runtime) => {
           logger.info(`[runtime] Playwright ready=${runtime.ready} reason=${runtime.reason}`);
         }).catch((err) => {
           logger.error(`[runtime] Playwright preflight call failed: ${err.message}`);

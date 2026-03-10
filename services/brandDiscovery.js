@@ -544,6 +544,7 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   const poolTargetSize = Math.max(100, parseInt(process.env.DISCOVERY_POOL_TARGET_SIZE || '1000', 10));
   const poolFillChunkSize = Math.max(10, parseInt(process.env.DISCOVERY_POOL_FILL_BATCH || '12', 10));
   const poolMaxCallsPerRun = Math.max(1, parseInt(process.env.DISCOVERY_POOL_MAX_CALLS_PER_RUN || '3', 10));
+  const poolRefillThreshold = Math.max(limit, parseInt(process.env.DISCOVERY_POOL_REFILL_THRESHOLD || '100', 10));
   const poolRefillOnExhaust = envFlag('DISCOVERY_POOL_REFILL_ON_EXHAUST', true);
   const poolRefillBurstMaxCalls = Math.max(1, parseInt(process.env.DISCOVERY_POOL_REFILL_BURST_MAX_CALLS || '120', 10));
   const poolHighQualityOnly = envFlag('DISCOVERY_POOL_HIGH_QUALITY_ONLY', true);
@@ -561,23 +562,30 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
     if (poolEnabled && hasClaudeKey) {
       const initialPoolStats = await getDiscoveryPoolStats(existingDomains);
       const needsExhaustRefill = poolRefillOnExhaust && initialPoolStats.available < limit;
-      const refillTarget = needsExhaustRefill
-        ? Math.max(poolTargetSize, initialPoolStats.available + 1000)
-        : poolTargetSize;
-      const neededForTarget = Math.max(0, refillTarget - initialPoolStats.available);
-      const computedCalls = neededForTarget > 0 ? Math.ceil(neededForTarget / poolFillChunkSize) : 0;
-      const maxCalls = needsExhaustRefill
-        ? Math.min(poolRefillBurstMaxCalls, Math.max(poolMaxCallsPerRun, computedCalls))
-        : poolMaxCallsPerRun;
+      const belowThreshold = initialPoolStats.available < poolRefillThreshold;
+      const shouldRefill = needsExhaustRefill || belowThreshold;
 
-      const fillStats = await fillDiscoveryPool({
-        targetSize: refillTarget,
-        existingDomains,
-        maxCalls,
-        chunkSize: poolFillChunkSize,
-        highQualityOnly: poolHighQualityOnly
-      });
-      logger.info(`[discovery_pool] queued=${fillStats.queued} available=${fillStats.available} target=${fillStats.targetSize} calls=${fillStats.calls} generated=${fillStats.generated} exhaust_refill=${needsExhaustRefill}`);
+      if (shouldRefill) {
+        const refillTarget = needsExhaustRefill
+          ? Math.max(poolTargetSize, initialPoolStats.available + 1000)
+          : poolTargetSize;
+        const neededForTarget = Math.max(0, refillTarget - initialPoolStats.available);
+        const computedCalls = neededForTarget > 0 ? Math.ceil(neededForTarget / poolFillChunkSize) : 0;
+        const maxCalls = needsExhaustRefill
+          ? Math.min(poolRefillBurstMaxCalls, Math.max(poolMaxCallsPerRun, computedCalls))
+          : poolMaxCallsPerRun;
+
+        const fillStats = await fillDiscoveryPool({
+          targetSize: refillTarget,
+          existingDomains,
+          maxCalls,
+          chunkSize: poolFillChunkSize,
+          highQualityOnly: poolHighQualityOnly
+        });
+        logger.info(`[discovery_pool] queued=${fillStats.queued} available=${fillStats.available} target=${fillStats.targetSize} calls=${fillStats.calls} generated=${fillStats.generated} exhaust_refill=${needsExhaustRefill}`);
+      } else {
+        logger.info(`[discovery_pool] skip_refill=true available=${initialPoolStats.available} threshold=${poolRefillThreshold} limit=${limit}`);
+      }
 
       const pooled = await fetchFromDiscoveryPool(limit, existingDomains);
       for (const brand of pooled) {

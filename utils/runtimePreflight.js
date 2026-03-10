@@ -13,6 +13,12 @@ let runtimeState = {
 
 let checkingPromise = null;
 
+function envFlag(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
+
 function withLibraryPaths() {
   const libPaths = [
     path.join(__dirname, '../.local-libs/usr/lib/x86_64-linux-gnu'),
@@ -92,14 +98,18 @@ async function ensurePlaywrightRuntimeReady({ autoInstall = true } = {}) {
 
   checkingPromise = (async () => {
     withLibraryPaths();
+    const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    const installAllowed = autoInstall && envFlag('PLAYWRIGHT_PREFLIGHT_AUTO_INSTALL', !isProduction);
     runtimeState.checkedAt = new Date();
 
     try {
       let execPath = getExecutablePathSafe();
       if (!execPath || !fs.existsSync(execPath)) {
-        if (autoInstall) {
+        if (installAllowed) {
           tryInstallChromium();
           execPath = getExecutablePathSafe();
+        } else {
+          logger.warn('[runtime] Playwright browser missing and runtime auto-install disabled. Ensure Chromium is installed at build time.');
         }
       }
 
@@ -116,7 +126,7 @@ async function ensurePlaywrightRuntimeReady({ autoInstall = true } = {}) {
         runtimeState.reason = 'ok';
         logger.info('[runtime] Playwright preflight passed (launch smoke test succeeded).');
       } catch (err) {
-        if (autoInstall && isSharedLibError(err)) {
+        if (installAllowed && isSharedLibError(err)) {
           try {
             tryInstallChromiumWithDeps();
             await launchSmokeTest();
