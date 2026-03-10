@@ -1,0 +1,427 @@
+/**
+ * REST API Routes - with live log streaming
+ */
+const express = require('express');
+const router = express.Router();
+const EventEmitter = require('events');
+const fs = require('fs');
+const path = require('path');
+const Brand = require('../models/Brand');
+const EmailMessage = require('../models/EmailMessage');
+const { requireApiAuth } = require('../middleware/auth');
+const { run } = require('../agents/brandOnboardingAgent');
+const { scanRecentEmails } = require('../services/emailChangeDetector');
+const { processInbox } = require('../services/inboxProcessor');
+const { processPendingConfirmations } = require('../services/confirmationProcessor');
+const { ingestPendingNewsletters } = require('../services/newsletterIngestor');
+const { runJob } = require('../jobs/runJob');
+const logger = require('../utils/logger');
+const ActivityLog = require('../models/ActivityLog');
+const WorkflowRun = require('../models/WorkflowRun');
+const { appendActivityLog } = require('../utils/activityLog');
+
+// -- Live Log System --------------------------------------------
+const agentEmitter = new EventEmitter();
+agentEmitter.setMaxListeners(100);
+
+// Rolling in-memory log buffer (last 500 entries)
+const LOG_BUFFER = [];
+const MAX_LOGS = 500;
+
+function pushLog(entry) {
+  const log = { ...entry, timestamp: new Date().toISOString() };
+  LOG_BUFFER.push(log);
+  if (LOG_BUFFER.length > MAX_LOGS) LOG_BUFFER.shift();
+  agentEmitter.emit('log', log);
+  appendActivityLog({
+    source: 'api_agent',
+    level: entry.level || 'info',
+    phase: entry.phase || 'general',
+    message: entry.message || '',
+    meta: { stats: entry.stats || null }
+  });
+}
+
+async function startWorkflowRun(step, meta = {}) {
+  try {
+    return await WorkflowRun.create({
+      step,
+      trigger: 'api',
+      status: 'running',
+      startedAt: new Date(),
+      meta
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function completeWorkflowRun(run, status, summary = null, error = null) {
+  if (!run) return;
+  try {
+    run.status = status;
+    run.summary = summary;
+    run.error = error;
+    run.completedAt = new Date();
+    run.durationMs = Math.max(0, run.completedAt.getTime() - new Date(run.startedAt).getTime());
+    await run.save();
+  } catch {
+    // non-fatal
+  }
+}
+
+async function runStepWithTracking(step, options, meta = {}) {
+  const run = await startWorkflowRun(step, meta);
+  try {
+    const result = await runJob(step, options || {});
+    await completeWorkflowRun(run, 'success', result, null);
+    return { status: 'success', result };
+  } catch (err) {
+    await completeWorkflowRun(run, 'failed', null, err.message);
+    return { status: 'failed', error: err.message };
+  }
+}
+
+// -- SSE Endpoint (open - proxied securely via Next.js server route) --
+router.get('/events', (req, res) => {
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const clientId = `${Date.now()}-${Math.random()}`;
+
+  // Send snapshot on connect
+  const init = JSON.stringify({
+    type: 'init',
+    running: agentRunning,
+    logs: LOG_BUFFER.slice(-100),
+    stats: currentStats,
+    lastResult: agentLastResult
+  });
+  res.write(`data: ${init}\n\n`);
+
+  const onLog = (entry) => {
+    try { res.write(`data: ${JSON.stringify({ type: 'log', entry })}\n\n`); } catch (_) {}
+  };
+  agentEmitter.on('log', onLog);
+
+  req.on('close', () => {
+    agentEmitter.off('log', onLog);
+  });
+});
+
+// -- Agent state ------------------------------------------------
+let agentRunning    = false;
+let agentLastResult = null;
+let currentStats    = {};
+let runStartedAt    = null;
+let stopRequested   = false;
+
+// -- All routes below require auth -----------------------------
+router.use(requireApiAuth);
+
+/**
+ * POST /api/agent/run
+ */
+router.post('/agent/run', async (req, res) => {
+  if (agentRunning) {
+    return res.status(409).json({ error: 'Agent is already running', status: 'running' });
+  }
+
+  const { batchSize = 10, mode = 'full' } = req.body;
+  if (batchSize < 1 || batchSize > 200) {
+    return res.status(400).json({ error: 'batchSize must be between 1 and 200' });
+  }
+
+  agentRunning  = true;
+  currentStats  = {};
+  runStartedAt  = new Date();
+  stopRequested = false;
+  LOG_BUFFER.length = 0;
+
+  pushLog({ level: 'info', phase: 'start', message: ` Agent started - mode: ${mode}, batchSize: ${batchSize}` });
+  res.json({ message: 'Agent started', batchSize, mode, status: 'running' });
+  const workflowStep = mode === 'full' ? 'discover_and_signup' : 'discover_and_signup';
+  startWorkflowRun(workflowStep, { mode, batchSize }).then((runRow) => {
+    const onProgress = (entry) => pushLog(entry);
+
+    run({ batchSize, mode, onProgress, getStopFlag: () => stopRequested })
+      .then(async result => {
+        agentLastResult = { ...result, completedAt: new Date(), status: 'completed' };
+        currentStats    = result;
+        pushLog({ level: 'success', phase: 'done', message: '[OK] Run complete!', stats: result });
+        await completeWorkflowRun(runRow, 'success', result, null);
+      })
+      .catch(async err => {
+        agentLastResult = { error: err.message, status: 'failed', completedAt: new Date() };
+        pushLog({ level: 'error', phase: 'error', message: `[ERR] Run failed: ${err.message}` });
+        logger.error('Agent run failed:', err);
+        await completeWorkflowRun(runRow, 'failed', null, err.message);
+      })
+      .finally(() => { agentRunning = false; });
+  });
+});
+
+/** POST /api/agent/stop */
+router.post('/agent/stop', (req, res) => {
+  if (!agentRunning) return res.json({ message: 'Agent is not running' });
+  stopRequested = true;
+  pushLog({ level: 'warn', phase: 'stop', message: ' Stop requested - will halt after current brand' });
+  res.json({ message: 'Stop signal sent' });
+});
+
+/** GET /api/agent/status */
+router.get('/agent/status', (req, res) => {
+  res.json({
+    running:    agentRunning,
+    startedAt:  runStartedAt,
+    stats:      currentStats,
+    lastResult: agentLastResult,
+    recentLogs: LOG_BUFFER.slice(-80)
+  });
+});
+
+/** GET /api/activity/logs?limit=200&source=runtime&level=info */
+router.get('/activity/logs', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 200), 1000);
+    const query = {};
+    if (req.query.source) query.source = String(req.query.source);
+    if (req.query.level) query.level = String(req.query.level);
+    if (req.query.phase) query.phase = String(req.query.phase);
+    const logs = await ActivityLog.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    res.json({ logs, count: logs.length });
+  } catch (err) {
+    logger.error('Failed to fetch activity logs', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** GET /api/activity/workflow-runs?limit=120&step=scan_inbox */
+router.get('/activity/workflow-runs', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 120), 500);
+    const query = {};
+    if (req.query.step) query.step = String(req.query.step);
+    if (req.query.status) query.status = String(req.query.status);
+    const runs = await WorkflowRun.find(query)
+      .sort({ startedAt: -1 })
+      .limit(limit)
+      .lean();
+    res.json({ runs, count: runs.length });
+  } catch (err) {
+    logger.error('Failed to fetch workflow runs', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** GET /api/activity/newsletters?limit=40 */
+router.get('/activity/newsletters', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit || 40), 200);
+    const messages = await EmailMessage.find({
+      state: 'ingested',
+      emailType: { $in: ['welcome', 'newsletter'] }
+    })
+      .sort({ receivedAt: -1 })
+      .limit(limit)
+      .lean();
+
+    const brandIds = [...new Set(messages.map((m) => String(m.brandId || '')).filter(Boolean))];
+    const brands = await Brand.find({ _id: { $in: brandIds } }, { name: 1, domain: 1 }).lean();
+    const brandMap = new Map(brands.map((b) => [String(b._id), b]));
+
+    const rows = messages.map((m) => ({
+      id: String(m._id),
+      gmailMessageId: m.gmailMessageId,
+      emailType: m.emailType,
+      subject: m.subject || '',
+      fromEmail: m.fromEmail || '',
+      receivedAt: m.receivedAt,
+      screenshotPath: m.screenshotPath || null,
+      screenshotUrl: m.screenshotPath ? `/api/activity/newsletters/${m._id}/screenshot` : null,
+      brand: m.brandId ? (brandMap.get(String(m.brandId)) || null) : null
+    }));
+
+    res.json({ rows, count: rows.length });
+  } catch (err) {
+    logger.error('Failed to fetch ingested newsletters', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** GET /api/activity/newsletters/:id/screenshot */
+router.get('/activity/newsletters/:id/screenshot', async (req, res) => {
+  try {
+    const message = await EmailMessage.findById(req.params.id).select('screenshotPath').lean();
+    if (!message?.screenshotPath) {
+      return res.status(404).json({ error: 'Screenshot not found' });
+    }
+    const filePath = path.resolve(message.screenshotPath);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Screenshot file missing on server' });
+    }
+    res.setHeader('Cache-Control', 'private, max-age=120');
+    return res.sendFile(filePath);
+  } catch (err) {
+    logger.error('Failed to load screenshot', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/agent/scan-emails */
+router.post('/agent/scan-emails', async (req, res) => {
+  const { hours = 24 } = req.body;
+  try {
+    const result = await scanRecentEmails(hours);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/agent/process-inbox */
+router.post('/agent/process-inbox', async (req, res) => {
+  const run = await startWorkflowRun('scan_inbox', { body: req.body || {} });
+  try {
+    const { hours = 24, maxResults = 100 } = req.body || {};
+    const result = await processInbox({ hours, maxResults });
+    await completeWorkflowRun(run, 'success', result, null);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    await completeWorkflowRun(run, 'failed', null, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/agent/process-confirmations */
+router.post('/agent/process-confirmations', async (req, res) => {
+  const run = await startWorkflowRun('process_confirmations', { body: req.body || {} });
+  try {
+    const { limit = 50 } = req.body || {};
+    const result = await processPendingConfirmations({ limit });
+    await completeWorkflowRun(run, 'success', result, null);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    await completeWorkflowRun(run, 'failed', null, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/agent/ingest-newsletters */
+router.post('/agent/ingest-newsletters', async (req, res) => {
+  const run = await startWorkflowRun('ingest_newsletters', { body: req.body || {} });
+  try {
+    const { limit = 50 } = req.body || {};
+    const result = await ingestPendingNewsletters({ limit });
+    await completeWorkflowRun(run, 'success', result, null);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    await completeWorkflowRun(run, 'failed', null, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/agent/run-simplified-cycle */
+router.post('/agent/run-simplified-cycle', async (req, res) => {
+  const options = req.body || {};
+  const run = await startWorkflowRun('run_simplified_cycle', { body: options });
+  try {
+    const startedAt = new Date().toISOString();
+    const discover_and_signup = await runStepWithTracking('discover_and_signup', options, { source: 'run_simplified_cycle' });
+    const scan_inbox = await runStepWithTracking('scan_inbox', options, { source: 'run_simplified_cycle' });
+    const process_confirmations = await runStepWithTracking('process_confirmations', options, { source: 'run_simplified_cycle' });
+    const ingest_newsletters = await runStepWithTracking('ingest_newsletters', options, { source: 'run_simplified_cycle' });
+
+    const result = {
+      startedAt,
+      discover_and_signup,
+      scan_inbox,
+      process_confirmations,
+      ingest_newsletters,
+      completedAt: new Date().toISOString()
+    };
+
+    const hasFailure = [discover_and_signup, scan_inbox, process_confirmations, ingest_newsletters]
+      .some((s) => s.status !== 'success');
+    await completeWorkflowRun(run, hasFailure ? 'failed' : 'success', result, hasFailure ? 'One or more steps failed' : null);
+    res.status(hasFailure ? 207 : 200).json({ success: !hasFailure, ...result });
+  } catch (err) {
+    await completeWorkflowRun(run, 'failed', null, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -- Brand CRUD -------------------------------------------------
+
+router.get('/brands', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, status, category, tier, minScore, search, sort = '-createdAt', stale } = req.query;
+    const query = {};
+    if (status)            query.onboardingStatus = status;
+    if (category)          query.$or = [{ primaryCategory: category }, { categories: category }];
+    if (tier)              query.brandTier = tier;
+    if (stale === 'true')  query.isStale = true;
+    if (stale === 'false') query.isStale = { $ne: true };
+    if (minScore)          query.qualityScore = { $gte: Number(minScore) };
+    if (search)            query.$text = { $search: search };
+
+    const total  = await Brand.countDocuments(query);
+    const brands = await Brand.find(query).sort(sort)
+      .skip((page - 1) * limit).limit(Number(limit))
+      .select('-signupAttemptLog -statusHistory -sampleEmails');
+
+    res.json({ brands, pagination: { total, page: Number(page), limit: Number(limit), pages: Math.ceil(total / limit) } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/brands/stats', async (req, res) => {
+  try {
+    const [generalStats] = await Brand.getStats();
+    const byCategory = await Brand.aggregate([
+      { $group: { _id: '$primaryCategory', count: { $sum: 1 }, avgQuality: { $avg: '$qualityScore' } } },
+      { $sort: { count: -1 } }
+    ]);
+    const byStatus = await Brand.aggregate([{ $group: { _id: '$onboardingStatus', count: { $sum: 1 } } }]);
+    res.json({ general: generalStats || {}, byCategory, byStatus });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/brands/:id', async (req, res) => {
+  try {
+    const brand = await Brand.findById(req.params.id);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+    res.json(brand);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.patch('/brands/:id', async (req, res) => {
+  try {
+    const allowedFields = ['notes','qualityScore','affiliatePotentialScore','primaryCategory',
+      'categories','tags','hasAffiliateProgram','affiliateNetworks','estimatedRevShare',
+      'affiliateSignupUrl','logoUrl','description','onboardingStatus','isStale'];
+    const updates = {};
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) updates[field] = req.body[field];
+    }
+    const brand = await Brand.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+    res.json(brand);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.delete('/brands/:id', async (req, res) => {
+  try {
+    const brand = await Brand.findByIdAndUpdate(req.params.id,
+      { $set: { onboardingStatus: 'skipped', notes: 'Manually removed' } }, { new: true });
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+module.exports = router;

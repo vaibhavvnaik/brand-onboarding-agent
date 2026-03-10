@@ -1,0 +1,5 @@
+node_modules
+.local-debs
+.local-libs
+artifacts/newsletters
+.env
