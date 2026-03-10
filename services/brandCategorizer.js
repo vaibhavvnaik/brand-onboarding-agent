@@ -31,66 +31,57 @@ async function categorizeBrand(brand) {
     return { success: false, data: getDefaultCategorization(brand), error: 'ANTHROPIC_API_KEY not configured' };
   }
 
-  const prompt = `You are an expert D2C (direct-to-consumer) brand analyst helping to build a curated newsletter discovery platform called urklist.com. Your job is to categorize and score brands so their newsletters can be matched to end consumers and monetized through affiliate marketing.
+  const prompt = `Classify this D2C brand and return compact JSON only (no markdown, no prose).
+Keep arrays short and strings concise.
 
-Analyze this brand and return a JSON object with the categorization.
+Brand:
+name=${brand.name}
+domain=${brand.domain}
+website=${brand.websiteUrl || 'N/A'}
+description=${brand.description || 'N/A'}
+tags=${(brand.milledIndustrialTags || []).join(', ') || 'none'}
 
-BRAND INFORMATION:
-- Name: ${brand.name}
-- Domain: ${brand.domain}
-- Website: ${brand.websiteUrl || 'N/A'}
-- Description: ${brand.description || 'Not available'}
-- Industry tags from Milled.com: ${(brand.milledIndustrialTags || []).join(', ') || 'None'}
+Allowed primaryCategory:
+Fashion & Apparel|Beauty & Skincare|Health & Wellness|Home & Living|Food & Beverage|Fitness & Sports|Outdoor & Adventure|Tech & Gadgets|Sustainable & Eco|Baby & Kids|Pets|Travel & Luggage|Jewelry & Watches|Personal Care & Grooming|Gifts & Novelty|Office & Stationery|Art & Craft|Other
 
-AVAILABLE PRIMARY CATEGORIES (pick the single most fitting one):
-"Fashion & Apparel", "Beauty & Skincare", "Health & Wellness", "Home & Living",
-"Food & Beverage", "Fitness & Sports", "Outdoor & Adventure", "Tech & Gadgets",
-"Sustainable & Eco", "Baby & Kids", "Pets", "Travel & Luggage", "Jewelry & Watches",
-"Personal Care & Grooming", "Gifts & Novelty", "Office & Stationery", "Art & Craft", "Other"
-
-Return ONLY a valid JSON object (no markdown, no explanation) with exactly this structure:
+Return exactly:
 {
-  "primaryCategory": "string - single best category from the list above",
-  "categories": ["array", "of 1-4 applicable categories"],
-  "productTypes": ["array of specific product types, e.g. 'sneakers', 'serums', 'protein powder'"],
-  "tags": ["array of 5-12 specific searchable tags"],
-  "lifestyleTags": ["array of 2-5 lifestyle descriptors"],
-  "targetDemographic": ["array of relevant segments: 'women', 'men', 'gen-z', 'millennial', 'gen-x', 'parents', 'athletes', 'professionals', 'students'"],
-  "genderFocus": "one of: women | men | unisex | kids | all",
-  "priceRange": "one of: budget | mid-range | premium | luxury | mixed",
-  "brandTier": "one of: emerging | established | premium | luxury | niche",
-  "audienceSize": "one of: niche | mid | large | mega",
-  "businessModel": "one of: dtc | retail | marketplace | subscription | hybrid",
-  "affiliateNetworks": ["likely affiliate networks this brand would use, e.g. 'ShareASale', 'CJ', 'Rakuten', 'Impact', 'AvantLink', 'Pepperjam'"],
-  "hasAffiliateProgram": true or false,
-  "estimatedRevShare": "estimated commission range, e.g. '5-10%' or 'unknown'",
-  "qualityScore": number from 1-10 (10 = iconic brand with massive audience and premium positioning),
-  "affiliatePotentialScore": number from 1-10 (10 = high-value affiliate with large audience + strong commission),
-  "contentScore": null,
-  "description": "1-2 sentence brand description if not provided, or enhance the existing one",
-  "headquarters": "City, Country if inferable",
-  "reasoning": "1 sentence explaining the quality and affiliate scores"
+  "primaryCategory":"",
+  "categories":[],
+  "productTypes":[],
+  "tags":[],
+  "lifestyleTags":[],
+  "targetDemographic":[],
+  "genderFocus":"women|men|unisex|kids|all",
+  "priceRange":"budget|mid-range|premium|luxury|mixed",
+  "brandTier":"emerging|established|premium|luxury|niche",
+  "audienceSize":"niche|mid|large|mega",
+  "businessModel":"dtc|retail|marketplace|subscription|hybrid",
+  "affiliateNetworks":[],
+  "hasAffiliateProgram":false,
+  "estimatedRevShare":"unknown",
+  "qualityScore":5,
+  "affiliatePotentialScore":5,
+  "contentScore":null,
+  "description":"",
+  "headquarters":"unknown",
+  "reasoning":""
 }
 
-SCORING GUIDELINES:
-- qualityScore: Consider brand recognition, product quality, audience loyalty, content quality of newsletters
-  - 9-10: Iconic household names with millions of loyal customers (e.g. Patagonia, Glossier)
-  - 7-8: Well-known in their niche with strong community (e.g. Allbirds, Mejuri)
-  - 5-6: Solid established brands with growing audience
-  - 3-4: Emerging brands or regional players
-  - 1-2: Unknown or low-quality brands
-
-- affiliatePotentialScore: Consider commission rates, average order value, conversion rates, audience size
-  - 9-10: High AOV + generous commissions + massive audience (luxury, beauty, tech)
-  - 7-8: Good commissions + established affiliate program
-  - 5-6: Moderate affiliate potential
-  - 3-4: Limited affiliate program or low AOV
-  - 1-2: No affiliate program likely or very niche`;
+Constraints:
+- categories: 1-3
+- productTypes: 0-4
+- tags: 3-8
+- lifestyleTags: 0-3
+- targetDemographic: 1-4
+- affiliateNetworks: 0-3
+- description max 16 words
+- reasoning max 10 words`;
 
   try {
     const response = await client.messages.create({
       model:      'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: 560,
       messages:   [{ role: 'user', content: prompt }]
     });
 
@@ -136,44 +127,28 @@ async function categorizeBrandBatch(brands) {
     `Brand ${i + 1}:\n- Name: ${brand.name}\n- Domain: ${brand.domain}\n- Website: ${brand.websiteUrl || 'N/A'}\n- Description: ${brand.description || 'Not available'}\n- Industry tags: ${(brand.milledIndustrialTags || []).join(', ') || 'None'}`
   ).join('\n\n');
 
-  const prompt = `You are an expert D2C (direct-to-consumer) brand analyst for urklist.com. Analyze these ${brands.length} brands and return a JSON ARRAY with ${brands.length} categorization objects.
+  const prompt = `Analyze ${brands.length} D2C brands and return JSON array only. No markdown.
+Be concise: short arrays, short strings.
 
-BRANDS TO ANALYZE:
+Brands:
 ${brandsList}
 
-AVAILABLE PRIMARY CATEGORIES (pick the single most fitting one):
-"Fashion & Apparel", "Beauty & Skincare", "Health & Wellness", "Home & Living",
-"Food & Beverage", "Fitness & Sports", "Outdoor & Adventure", "Tech & Gadgets",
-"Sustainable & Eco", "Baby & Kids", "Pets", "Travel & Luggage", "Jewelry & Watches",
-"Personal Care & Grooming", "Gifts & Novelty", "Office & Stationery", "Art & Craft", "Other"
+Each array item must include:
+primaryCategory,categories,productTypes,tags,lifestyleTags,targetDemographic,genderFocus,priceRange,brandTier,audienceSize,businessModel,affiliateNetworks,hasAffiliateProgram,estimatedRevShare,qualityScore,affiliatePotentialScore,contentScore,description,headquarters,reasoning
 
-Return ONLY a valid JSON array of ${brands.length} objects (no markdown, no explanation), each with exactly this structure:
-{
-  "primaryCategory": "string - single best category from the list above",
-  "categories": ["array", "of 1-4 applicable categories"],
-  "productTypes": ["array of specific product types, e.g. 'sneakers', 'serums', 'protein powder'"],
-  "tags": ["array of 5-12 specific searchable tags"],
-  "lifestyleTags": ["array of 2-5 lifestyle descriptors"],
-  "targetDemographic": ["array of relevant segments: 'women', 'men', 'gen-z', 'millennial'"],
-  "genderFocus": "one of: women | men | unisex | kids | all",
-  "priceRange": "one of: budget | mid-range | premium | luxury | mixed",
-  "brandTier": "one of: emerging | established | premium | luxury | niche",
-  "audienceSize": "one of: niche | mid | large | mega",
-  "businessModel": "one of: dtc | retail | marketplace | subscription | hybrid",
-  "affiliateNetworks": ["likely affiliate networks this brand would use"],
-  "hasAffiliateProgram": true or false,
-  "estimatedRevShare": "estimated commission range, e.g. '5-10%' or 'unknown'",
-  "qualityScore": number from 1-10,
-  "affiliatePotentialScore": number from 1-10,
-  "contentScore": null,
-  "description": "1-2 sentence brand description if not provided, or enhance the existing one",
-  "headquarters": "City, Country if inferable",
-  "reasoning": "1 sentence explaining the quality and affiliate scores"
-}`;
+Constraints:
+- categories 1-3
+- productTypes 0-4
+- tags 3-8
+- lifestyleTags 0-3
+- targetDemographic 1-4
+- affiliateNetworks 0-3
+- description max 16 words
+- reasoning max 10 words`;
 
   const response = await client.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: Math.min(4096, 600 + brands.length * 420),
+    max_tokens: Math.min(2200, 280 + brands.length * 190),
     messages: [{ role: 'user', content: prompt }]
   });
 

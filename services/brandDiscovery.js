@@ -59,35 +59,25 @@ async function discoverBrandsWithClaude(limit, existingDomains = new Set()) {
   ]);
 
   const avoidList = Array.from(blocked).filter(Boolean).slice(0, 220);
-  const prompt = `Return exactly ${limit} unique direct-to-consumer brands as JSON only.
-No markdown. No explanation.
+  const prompt = `Return exactly ${limit} real D2C ecommerce brands as compact JSON only.
+No markdown. No prose.
 
-Output schema:
-[
-  {
-    "name": "Brand Name",
-    "domain": "example.com",
-    "websiteUrl": "https://www.example.com",
-    "primaryCategory": "one of Fashion & Apparel|Beauty & Skincare|Health & Wellness|Home & Living|Food & Beverage|Fitness & Sports|Outdoor & Adventure|Tech & Gadgets|Sustainable & Eco|Baby & Kids|Pets|Travel & Luggage|Jewelry & Watches|Personal Care & Grooming|Gifts & Novelty|Office & Stationery|Art & Craft|Other",
-    "brandTier": "emerging|established|premium|luxury|niche",
-    "reason": "short phrase"
-  }
-]
+JSON array schema:
+[{"name":"","domain":"","websiteUrl":"","primaryCategory":"","brandTier":"","reason":""}]
 
 Rules:
-- Real brands with active ecommerce websites.
-- Domain must be root domain only (no path, no www prefix).
-- Do not include marketplaces, publishers, or software tools.
-- Keep reason very short (max 12 words).
-- Never include any of these domains:
-${avoidList.join(', ') || '(none)'}
+- domain must be root only (no path, no www)
+- exclude marketplaces/publishers/software tools
+- reason max 6 words
+- keep values short and concise
+- do not include these domains: ${avoidList.join(', ') || '(none)'}
 `;
 
   let results = [];
   try {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 900,
+      max_tokens: Math.max(320, Math.min(700, 180 + limit * 42)),
       messages: [{ role: 'user', content: prompt }]
     });
 
