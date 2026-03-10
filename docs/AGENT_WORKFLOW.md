@@ -126,3 +126,17 @@ This means cowork/manual signups are automatically regularized into the same dow
 - `DISCOVERY_SOURCE=claude_only`: Claude only unless `DISCOVERY_STRICT_CLAUDE=true`.
 - `DISCOVERY_STRICT_CLAUDE=false` (default): if Claude/key fails, fallback discovery prevents cycle failure.
 - `ANTHROPIC_API_KEY` must be present for Claude generation.
+
+## Discovery Pool (1000 Candidate Buffer)
+
+- Discovery now supports a persistent Mongo pool of candidates (`discovery_candidates` collection).
+- On each run, agent consumes next `batchSize` brands from this stored pool first.
+- Claude calls are used to top up pool only when available queue drops below target.
+- Default controls:
+  - `DISCOVERY_POOL_ENABLED=true`
+  - `DISCOVERY_POOL_TARGET_SIZE=1000`
+  - `DISCOVERY_POOL_FILL_BATCH=12`
+  - `DISCOVERY_POOL_MAX_CALLS_PER_RUN=3`
+- API endpoints:
+  - `GET /api/discovery/pool/stats`
+  - `POST /api/discovery/pool/fill` (body: `targetSize`, `maxCalls`, `chunkSize`)

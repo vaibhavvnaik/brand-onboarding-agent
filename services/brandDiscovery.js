@@ -7,6 +7,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const Anthropic = require('@anthropic-ai/sdk');
 const Config = require('../models/Config');
+const DiscoveryCandidate = require('../models/DiscoveryCandidate');
 const logger = require('../utils/logger');
 
 const BASE_HEADERS = {
@@ -45,14 +46,154 @@ function tierToScore(tier = '') {
   return { quality: 6, affiliate: 5 };
 }
 
-async function discoverBrandsWithClaude(limit, existingDomains = new Set()) {
+function toPoolScore(brand = {}) {
+  const q = Number(brand.qualityScore || 0);
+  const a = Number(brand.affiliatePotentialScore || 0);
+  return q * 100 + a * 10;
+}
+
+function normalizeBrandCandidate(brand = {}) {
+  const domain = normalizeDomain(brand.domain || brand.websiteUrl || '');
+  if (!domain) return null;
+  return {
+    domain,
+    name: String(brand.name || domain).trim(),
+    websiteUrl: String(brand.websiteUrl || `https://www.${domain}`).trim(),
+    description: String(brand.description || '').trim(),
+    primaryCategory: String(brand.primaryCategory || 'Other').trim(),
+    tier: String(brand.tier || brand.brandTier || 'established').toLowerCase(),
+    source: String(brand.source || 'claude_pool'),
+    sourceUrl: String(brand.sourceUrl || 'claude://discovery-pool'),
+    qualityScore: Number(brand.qualityScore || 6),
+    affiliatePotentialScore: Number(brand.affiliatePotentialScore || 5)
+  };
+}
+
+async function upsertDiscoveryPoolCandidates(brands = []) {
+  const ops = [];
+  for (const raw of brands) {
+    const item = normalizeBrandCandidate(raw);
+    if (!item) continue;
+    ops.push({
+      updateOne: {
+        filter: { domain: item.domain },
+        update: {
+          $set: {
+            name: item.name,
+            websiteUrl: item.websiteUrl,
+            description: item.description,
+            primaryCategory: item.primaryCategory,
+            tier: item.tier,
+            source: item.source,
+            sourceUrl: item.sourceUrl,
+            qualityScore: item.qualityScore,
+            affiliatePotentialScore: item.affiliatePotentialScore,
+            poolScore: toPoolScore(item),
+            status: 'queued',
+            disabledReason: null
+          },
+          $setOnInsert: {
+            timesServed: 0,
+            lastServedAt: null
+          }
+        },
+        upsert: true
+      }
+    });
+  }
+  if (!ops.length) return 0;
+  const res = await DiscoveryCandidate.bulkWrite(ops, { ordered: false });
+  return (res.upsertedCount || 0) + (res.modifiedCount || 0);
+}
+
+async function fetchFromDiscoveryPool(limit, existingDomains = new Set()) {
+  if (limit <= 0) return [];
+  const excluded = Array.from(existingDomains || []).map((d) => normalizeDomain(d)).filter(Boolean);
+  const query = {
+    status: 'queued',
+    domain: excluded.length ? { $nin: excluded } : { $exists: true }
+  };
+  const rows = await DiscoveryCandidate.find(query)
+    .sort({ poolScore: -1, updatedAt: -1, createdAt: 1 })
+    .limit(limit)
+    .lean();
+
+  if (rows.length) {
+    await DiscoveryCandidate.updateMany(
+      { _id: { $in: rows.map((row) => row._id) } },
+      { $inc: { timesServed: 1 }, $set: { lastServedAt: new Date() } }
+    );
+  }
+
+  return rows.map((row) => ({
+    name: row.name,
+    domain: row.domain,
+    websiteUrl: row.websiteUrl,
+    description: row.description,
+    source: row.source || 'claude_pool',
+    sourceUrl: row.sourceUrl || 'claude://discovery-pool',
+    primaryCategory: row.primaryCategory || 'Other',
+    tier: row.tier || 'established',
+    qualityScore: row.qualityScore || 6,
+    affiliatePotentialScore: row.affiliatePotentialScore || 5
+  }));
+}
+
+async function getDiscoveryPoolStats(existingDomains = new Set()) {
+  const excluded = Array.from(existingDomains || []).map((d) => normalizeDomain(d)).filter(Boolean);
+  const baseMatch = { status: 'queued' };
+  const availableMatch = {
+    status: 'queued',
+    domain: excluded.length ? { $nin: excluded } : { $exists: true }
+  };
+  const [queued, available] = await Promise.all([
+    DiscoveryCandidate.countDocuments(baseMatch),
+    DiscoveryCandidate.countDocuments(availableMatch)
+  ]);
+  return { queued, available };
+}
+
+async function fillDiscoveryPool({
+  targetSize = 1000,
+  existingDomains = new Set(),
+  maxCalls = 8,
+  chunkSize = 100
+} = {}) {
+  const safeTarget = Math.max(50, Math.min(3000, Number(targetSize || 1000)));
+  const safeCalls = Math.max(1, Math.min(20, Number(maxCalls || 8)));
+  const safeChunk = Math.max(10, Math.min(200, Number(chunkSize || 100)));
+  let calls = 0;
+  let generated = 0;
+  let upserted = 0;
+  const generationExclude = new Set(Array.from(existingDomains || []).map((d) => normalizeDomain(d)).filter(Boolean));
+
+  while (calls < safeCalls) {
+    const { available } = await getDiscoveryPoolStats(existingDomains);
+    if (available >= safeTarget) break;
+    const needed = Math.min(safeChunk, safeTarget - available);
+    const batch = await discoverBrandsWithClaude(needed, generationExclude, { useHistoryFilter: false });
+    calls += 1;
+    generated += batch.length;
+    if (!batch.length) break;
+    upserted += await upsertDiscoveryPoolCandidates(batch);
+    for (const item of batch) generationExclude.add(normalizeDomain(item.domain));
+    await sleep(350);
+  }
+
+  const stats = await getDiscoveryPoolStats(existingDomains);
+  return { calls, generated, upserted, ...stats, targetSize: safeTarget };
+}
+
+async function discoverBrandsWithClaude(limit, existingDomains = new Set(), options = {}) {
   const client = getAnthropicClient();
   if (!client) {
     logger.warn('[discovery] Claude discovery skipped: ANTHROPIC_API_KEY missing');
     return [];
   }
 
-  const history = await Config.get('claude_discovery_domains').catch(() => []) || [];
+  const requestedLimit = Math.max(1, Math.min(12, parseInt(limit || 1, 10)));
+  const useHistoryFilter = options.useHistoryFilter !== false;
+  const history = useHistoryFilter ? (await Config.get('claude_discovery_domains').catch(() => []) || []) : [];
   const blocked = new Set([
     ...Array.from(existingDomains || []).map((d) => normalizeDomain(d)),
     ...history.map((d) => normalizeDomain(d))
@@ -60,7 +201,7 @@ async function discoverBrandsWithClaude(limit, existingDomains = new Set()) {
 
   const avoidListMax = Math.max(20, parseInt(process.env.DISCOVERY_AVOID_LIST_MAX || '60', 10));
   const avoidList = Array.from(blocked).filter(Boolean).slice(-avoidListMax);
-  const prompt = `Return exactly ${limit} real D2C ecommerce brands as compact JSON only.
+  const prompt = `Return exactly ${requestedLimit} real D2C ecommerce brands as compact JSON only.
 No markdown. No prose.
 
 JSON array schema:
@@ -78,13 +219,16 @@ Rules:
   try {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: Math.max(260, Math.min(520, 140 + limit * 32)),
+      max_tokens: Math.max(600, Math.min(1400, 600 + requestedLimit * 50)),
       messages: [{ role: 'user', content: prompt }]
     });
     logger.info(`[llm] phase=discovery req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
     const raw = (response.content?.[0]?.text || '').trim();
-    const jsonStr = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+    const jsonBlock = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+    const start = jsonBlock.indexOf('[');
+    const end = jsonBlock.lastIndexOf(']');
+    const jsonStr = start >= 0 && end > start ? jsonBlock.slice(start, end + 1) : jsonBlock;
     const arr = JSON.parse(jsonStr);
     if (!Array.isArray(arr)) return [];
 
@@ -109,14 +253,14 @@ Rules:
         qualityScore: quality,
         affiliatePotentialScore: affiliate
       });
-      if (results.length >= limit) break;
+      if (results.length >= requestedLimit) break;
     }
   } catch (err) {
     logger.warn(`[discovery] Claude discovery failed: ${err.message}`);
     return [];
   }
 
-  if (results.length) {
+  if (results.length && useHistoryFilter) {
     try {
       const updatedHistory = Array.from(new Set([...history, ...results.map((r) => r.domain)])).slice(-1500);
       await Config.set('claude_discovery_domains', updatedHistory);
@@ -384,6 +528,10 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   const discovered = new Map(); // domain -> brand object, to deduplicate
   const discoverySource = String(process.env.DISCOVERY_SOURCE || 'claude').toLowerCase();
   const strictClaude = String(process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
+  const poolEnabled = envFlag('DISCOVERY_POOL_ENABLED', true);
+  const poolTargetSize = Math.max(100, parseInt(process.env.DISCOVERY_POOL_TARGET_SIZE || '1000', 10));
+  const poolFillChunkSize = Math.max(10, parseInt(process.env.DISCOVERY_POOL_FILL_BATCH || '100', 10));
+  const poolMaxCallsPerRun = Math.max(1, parseInt(process.env.DISCOVERY_POOL_MAX_CALLS_PER_RUN || '3', 10));
   const enableMilled = envFlag('DISCOVERY_ENABLE_MILLED', false);
   const milledMaxQueries = Math.max(1, parseInt(process.env.DISCOVERY_MILLED_MAX_QUERIES || '15', 10));
   const milledStopOn403 = envFlag('DISCOVERY_MILLED_STOP_ON_403', true);
@@ -395,15 +543,39 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
     if (!hasClaudeKey) {
       logger.warn('[discovery] ANTHROPIC_API_KEY missing; using fallback discovery sources');
     }
-    const claudeBrands = await discoverBrandsWithClaude(limit, existingDomains);
-    for (const brand of claudeBrands) {
-      const cleanDomain = normalizeDomain(brand.domain);
-      if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
-      discovered.set(cleanDomain, brand);
+    if (poolEnabled && hasClaudeKey) {
+      const fillStats = await fillDiscoveryPool({
+        targetSize: poolTargetSize,
+        existingDomains,
+        maxCalls: poolMaxCallsPerRun,
+        chunkSize: poolFillChunkSize
+      });
+      logger.info(`[discovery_pool] queued=${fillStats.queued} available=${fillStats.available} target=${fillStats.targetSize} calls=${fillStats.calls} generated=${fillStats.generated}`);
+
+      const pooled = await fetchFromDiscoveryPool(limit, existingDomains);
+      for (const brand of pooled) {
+        const cleanDomain = normalizeDomain(brand.domain);
+        if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+        discovered.set(cleanDomain, brand);
+      }
     }
+
+    if (discovered.size < limit) {
+      const missing = limit - discovered.size;
+      const claudeBrands = await discoverBrandsWithClaude(missing, existingDomains, { useHistoryFilter: true });
+      for (const brand of claudeBrands) {
+        const cleanDomain = normalizeDomain(brand.domain);
+        if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+        discovered.set(cleanDomain, brand);
+      }
+      if (poolEnabled && claudeBrands.length) {
+        await upsertDiscoveryPoolCandidates(claudeBrands);
+      }
+    }
+
     if (discovered.size >= limit) {
       const result = Array.from(discovered.values()).slice(0, limit);
-      logger.info(`[OK] Discovery complete (Claude): returning ${result.length} brands`);
+      logger.info(`[OK] Discovery complete (Claude/Pool): returning ${result.length} brands`);
       return result;
     }
     if (!allowFallback) {
@@ -504,4 +676,10 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   return result;
 }
 
-module.exports = { discoverBrands, scrapeMilledBrandPage, validateBrandWebsite };
+module.exports = {
+  discoverBrands,
+  scrapeMilledBrandPage,
+  validateBrandWebsite,
+  fillDiscoveryPool,
+  getDiscoveryPoolStats
+};

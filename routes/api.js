@@ -10,6 +10,7 @@ const Brand = require('../models/Brand');
 const EmailMessage = require('../models/EmailMessage');
 const { requireApiAuth } = require('../middleware/auth');
 const { run } = require('../agents/brandOnboardingAgent');
+const { fillDiscoveryPool, getDiscoveryPoolStats } = require('../services/brandDiscovery');
 const { scanRecentEmails } = require('../services/emailChangeDetector');
 const { processInbox } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
@@ -272,6 +273,33 @@ router.post('/runtime/playwright-preflight', async (req, res) => {
   try {
     const status = await ensurePlaywrightRuntimeReady({ autoInstall: true });
     res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** GET /api/discovery/pool/stats */
+router.get('/discovery/pool/stats', async (req, res) => {
+  try {
+    const existingBrands = await Brand.find({}, 'domain').lean();
+    const existingDomains = new Set(existingBrands.map((b) => String(b.domain || '').toLowerCase()));
+    const stats = await getDiscoveryPoolStats(existingDomains);
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/discovery/pool/fill */
+router.post('/discovery/pool/fill', async (req, res) => {
+  try {
+    const targetSize = Math.max(100, Number(req.body?.targetSize || process.env.DISCOVERY_POOL_TARGET_SIZE || 1000));
+    const maxCalls = Math.max(1, Number(req.body?.maxCalls || process.env.DISCOVERY_POOL_MAX_CALLS_PER_RUN || 8));
+    const chunkSize = Math.max(10, Number(req.body?.chunkSize || process.env.DISCOVERY_POOL_FILL_BATCH || 100));
+    const existingBrands = await Brand.find({}, 'domain').lean();
+    const existingDomains = new Set(existingBrands.map((b) => String(b.domain || '').toLowerCase()));
+    const result = await fillDiscoveryPool({ targetSize, existingDomains, maxCalls, chunkSize });
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
