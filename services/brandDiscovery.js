@@ -80,6 +80,7 @@ Rules:
       max_tokens: Math.max(320, Math.min(700, 180 + limit * 42)),
       messages: [{ role: 'user', content: prompt }]
     });
+    logger.info(`[llm] phase=discovery req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
     const raw = (response.content?.[0]?.text || '').trim();
     const jsonStr = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();

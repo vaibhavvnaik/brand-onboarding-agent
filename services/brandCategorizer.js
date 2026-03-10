@@ -84,6 +84,7 @@ Constraints:
       max_tokens: 560,
       messages:   [{ role: 'user', content: prompt }]
     });
+    logger.info(`[llm] phase=categorize_single brand=${brand.name} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
     const raw = response.content[0].text.trim();
 
@@ -151,6 +152,7 @@ Constraints:
     max_tokens: Math.min(2200, 280 + brands.length * 190),
     messages: [{ role: 'user', content: prompt }]
   });
+  logger.info(`[llm] phase=categorize_batch count=${brands.length} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
   const raw = response.content[0].text.trim();
   // Strip any markdown code fences if present
