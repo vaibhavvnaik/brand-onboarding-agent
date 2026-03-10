@@ -108,6 +108,10 @@ function buildWorkflowStepStates(brand) {
   };
 }
 
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 async function startWorkflowRun(step, meta = {}) {
   try {
     return await WorkflowRun.create({
@@ -636,6 +640,183 @@ router.get('/brands/stats', async (req, res) => {
     const byStatus = await Brand.aggregate([{ $group: { _id: '$onboardingStatus', count: { $sum: 1 } } }]);
     res.json({ general: generalStats || {}, byCategory, byStatus });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/brands/:id/external-sender-evidence', async (req, res) => {
+  try {
+    const brand = await Brand.findById(req.params.id).select(
+      'name domain knownSenderEmails knownSenderDomains externalSenderEvidence'
+    );
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    const minEmailCount = Math.max(1, Number(process.env.EXTERNAL_SENDER_PROMOTION_MIN_COUNT || 3));
+    const minDomainCount = Math.max(2, Number(process.env.EXTERNAL_SENDER_DOMAIN_PROMOTION_MIN_COUNT || 6));
+    const allowDomainPromotion = String(process.env.ALLOW_EXTERNAL_SENDER_DOMAIN_PROMOTION || 'false').toLowerCase() === 'true';
+    const knownEmails = new Set((brand.knownSenderEmails || []).map((value) => String(value).toLowerCase()));
+    const knownDomains = new Set((brand.knownSenderDomains || []).map((value) => String(value).toLowerCase()));
+
+    const rows = (brand.externalSenderEvidence || [])
+      .map((row) => {
+        const evidenceCount = Number(row.evidenceCount || 0);
+        const strongProofCount = Number(row.linkMatchesBrandDomainCount || 0) + Number(row.listIdMatchesBrandCount || 0);
+        const reviewStatus = String(row.reviewStatus || 'pending');
+        const senderEmail = normalizeEmail(row.senderEmail);
+        const senderDomain = String(row.senderDomain || '').toLowerCase();
+        const senderApexDomain = String(row.senderApexDomain || '').toLowerCase();
+        return {
+          senderEmail,
+          senderDomain,
+          senderApexDomain,
+          firstSeenAt: row.firstSeenAt || null,
+          lastSeenAt: row.lastSeenAt || null,
+          evidenceCount,
+          linkMatchesBrandDomainCount: Number(row.linkMatchesBrandDomainCount || 0),
+          listIdMatchesBrandCount: Number(row.listIdMatchesBrandCount || 0),
+          highConfidenceMatchCount: Number(row.highConfidenceMatchCount || 0),
+          lastMatchSource: row.lastMatchSource || null,
+          lastMatchConfidence: Number(row.lastMatchConfidence || 0),
+          promotedEmailAt: row.promotedEmailAt || null,
+          promotedDomainAt: row.promotedDomainAt || null,
+          reviewStatus,
+          reviewedAt: row.reviewedAt || null,
+          reviewNotes: row.reviewNotes || null,
+          isKnownSenderEmail: knownEmails.has(senderEmail),
+          isKnownSenderDomain: !!(senderDomain && knownDomains.has(senderDomain)) || !!(senderApexDomain && knownDomains.has(senderApexDomain)),
+          eligibleForEmailPromotion: reviewStatus !== 'rejected' && evidenceCount >= minEmailCount && strongProofCount > 0,
+          eligibleForDomainPromotion: allowDomainPromotion &&
+            reviewStatus !== 'rejected' &&
+            evidenceCount >= minDomainCount &&
+            Number(row.linkMatchesBrandDomainCount || 0) >= minEmailCount
+        };
+      })
+      .sort((a, b) => {
+        if ((b.evidenceCount || 0) !== (a.evidenceCount || 0)) return (b.evidenceCount || 0) - (a.evidenceCount || 0);
+        return new Date(b.lastSeenAt || 0).getTime() - new Date(a.lastSeenAt || 0).getTime();
+      });
+
+    res.json({
+      brand: {
+        id: brand._id,
+        name: brand.name,
+        domain: brand.domain
+      },
+      thresholds: {
+        emailPromotionMinCount: minEmailCount,
+        domainPromotionMinCount: minDomainCount,
+        allowDomainPromotion
+      },
+      count: rows.length,
+      rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/brands/:id/external-sender-evidence/promote', async (req, res) => {
+  try {
+    const senderEmail = normalizeEmail(req.body?.senderEmail);
+    if (!senderEmail) return res.status(400).json({ error: 'senderEmail is required' });
+
+    const promoteDomain = String(req.body?.promoteDomain || 'false').toLowerCase() === 'true';
+    const force = String(req.body?.force || 'false').toLowerCase() === 'true';
+    const reviewNotes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+
+    const brand = await Brand.findById(req.params.id);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    brand.externalSenderEvidence = brand.externalSenderEvidence || [];
+    const entry = brand.externalSenderEvidence.find((row) => normalizeEmail(row.senderEmail) === senderEmail);
+    if (!entry) return res.status(404).json({ error: 'External sender evidence entry not found' });
+
+    if (String(entry.reviewStatus || '').toLowerCase() === 'rejected' && !force) {
+      return res.status(409).json({
+        error: 'Entry is rejected; pass force=true to override',
+        senderEmail
+      });
+    }
+
+    const now = new Date();
+    const senderDomain = String(entry.senderDomain || '').toLowerCase();
+    const senderApexDomain = String(entry.senderApexDomain || '').toLowerCase();
+
+    const knownEmails = new Set((brand.knownSenderEmails || []).map((value) => String(value).toLowerCase()));
+    knownEmails.add(senderEmail);
+    brand.knownSenderEmails = Array.from(knownEmails);
+    entry.promotedEmailAt = entry.promotedEmailAt || now;
+
+    const history = brand.senderEmailHistory || [];
+    if (!history.find((row) => normalizeEmail(row.email) === senderEmail)) {
+      history.push({ email: senderEmail, reason: 'manual', firstSeenAt: now, lastSeenAt: now });
+      brand.senderEmailHistory = history;
+    }
+
+    if (promoteDomain) {
+      const knownDomains = new Set((brand.knownSenderDomains || []).map((value) => String(value).toLowerCase()));
+      if (senderDomain) knownDomains.add(senderDomain);
+      if (senderApexDomain) knownDomains.add(senderApexDomain);
+      brand.knownSenderDomains = Array.from(knownDomains);
+      entry.promotedDomainAt = entry.promotedDomainAt || now;
+    }
+
+    entry.reviewStatus = 'approved';
+    entry.reviewedAt = now;
+    if (reviewNotes) entry.reviewNotes = reviewNotes;
+
+    await brand.save();
+    res.json({
+      ok: true,
+      brandId: brand._id,
+      senderEmail,
+      promoteDomain,
+      row: entry
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/brands/:id/external-sender-evidence/reject', async (req, res) => {
+  try {
+    const senderEmail = normalizeEmail(req.body?.senderEmail);
+    if (!senderEmail) return res.status(400).json({ error: 'senderEmail is required' });
+
+    const removeExistingAlias = String(req.body?.removeExistingAlias || 'false').toLowerCase() === 'true';
+    const reviewNotes = typeof req.body?.notes === 'string' ? req.body.notes.trim() : '';
+    const now = new Date();
+
+    const brand = await Brand.findById(req.params.id);
+    if (!brand) return res.status(404).json({ error: 'Brand not found' });
+
+    brand.externalSenderEvidence = brand.externalSenderEvidence || [];
+    const entry = brand.externalSenderEvidence.find((row) => normalizeEmail(row.senderEmail) === senderEmail);
+    if (!entry) return res.status(404).json({ error: 'External sender evidence entry not found' });
+
+    entry.reviewStatus = 'rejected';
+    entry.reviewedAt = now;
+    if (reviewNotes) entry.reviewNotes = reviewNotes;
+
+    if (removeExistingAlias) {
+      const senderDomain = String(entry.senderDomain || '').toLowerCase();
+      const senderApexDomain = String(entry.senderApexDomain || '').toLowerCase();
+      brand.knownSenderEmails = (brand.knownSenderEmails || []).filter((value) => normalizeEmail(value) !== senderEmail);
+      brand.knownSenderDomains = (brand.knownSenderDomains || []).filter((value) => {
+        const normalized = String(value || '').toLowerCase();
+        return normalized !== senderDomain && normalized !== senderApexDomain;
+      });
+    }
+
+    await brand.save();
+    res.json({
+      ok: true,
+      brandId: brand._id,
+      senderEmail,
+      removedExistingAlias: removeExistingAlias,
+      row: entry
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/brands/:id', async (req, res) => {

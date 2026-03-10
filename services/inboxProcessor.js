@@ -1,7 +1,9 @@
 const Brand = require('../models/Brand');
 const EmailMessage = require('../models/EmailMessage');
+const axios = require('axios');
 const {
   searchMessages,
+  getGmailClient,
   getMessage,
   parseMessage,
   extractSenderEmail,
@@ -17,6 +19,10 @@ const {
 const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const BRAND_MATCH_CONFIDENCE_THRESHOLD = Math.max(
+  0,
+  Number(process.env.BRAND_MATCH_CONFIDENCE_THRESHOLD || 9)
+);
 
 function escapeRegex(input) {
   return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -40,6 +46,285 @@ function extractMeaningfulLinkDomains(links = []) {
     domains.add(reg);
   }
   return Array.from(domains);
+}
+
+function shouldTrackAsExternalSender(senderDomain, brandDomain) {
+  if (!senderDomain || !brandDomain) return false;
+  return !domainsRelated(senderDomain, brandDomain);
+}
+
+function extractListIdDomain(listId = '') {
+  const raw = String(listId || '').toLowerCase().trim();
+  if (!raw) return '';
+  const trimmed = raw.replace(/[<>]/g, '');
+  const pieces = trimmed.split('@');
+  if (pieces.length === 2) return normalizeDomain(pieces[1]);
+  return normalizeDomain(trimmed.split(/\s+/)[0]);
+}
+
+function countDomainMatchInSnapshots(linkSnapshots = [], brandDomain = '') {
+  if (!brandDomain) return 0;
+  const brandApex = getRegistrableDomain(brandDomain) || normalizeDomain(brandDomain);
+  let count = 0;
+  for (const snap of linkSnapshots || []) {
+    const domain = normalizeDomain(snap?.finalDomain || snap?.originalDomain || '');
+    if (!domain) continue;
+    if (domainsRelated(domain, brandApex)) count += 1;
+  }
+  return count;
+}
+
+function upsertExternalSenderEvidence(brand, {
+  senderEmail,
+  senderDomain,
+  senderApexDomain,
+  matchSource,
+  matchConfidence,
+  linkMatchesBrand,
+  listIdMatchesBrand
+}) {
+  if (!senderEmail) return null;
+  const now = new Date();
+  brand.externalSenderEvidence = brand.externalSenderEvidence || [];
+  let entry = (brand.externalSenderEvidence || []).find((row) => row.senderEmail === senderEmail);
+  if (!entry) {
+    entry = {
+      senderEmail,
+      senderDomain: senderDomain || '',
+      senderApexDomain: senderApexDomain || '',
+      firstSeenAt: now,
+      lastSeenAt: now,
+      evidenceCount: 0,
+      linkMatchesBrandDomainCount: 0,
+      listIdMatchesBrandCount: 0,
+      highConfidenceMatchCount: 0
+    };
+    brand.externalSenderEvidence.push(entry);
+  }
+
+  entry.lastSeenAt = now;
+  entry.evidenceCount = Number(entry.evidenceCount || 0) + 1;
+  if (linkMatchesBrand) entry.linkMatchesBrandDomainCount = Number(entry.linkMatchesBrandDomainCount || 0) + 1;
+  if (listIdMatchesBrand) entry.listIdMatchesBrandCount = Number(entry.listIdMatchesBrandCount || 0) + 1;
+  if (matchConfidence >= 8) entry.highConfidenceMatchCount = Number(entry.highConfidenceMatchCount || 0) + 1;
+  entry.lastMatchSource = matchSource || 'unknown';
+  entry.lastMatchConfidence = Number(matchConfidence || 0);
+  return entry;
+}
+
+function maybePromoteExternalSenderAlias(brand, entry, senderEmail, senderApexDomain) {
+  if (!entry || !senderEmail) return;
+  if (String(entry.reviewStatus || '').toLowerCase() === 'rejected') return;
+  const minEmailCount = Math.max(1, Number(process.env.EXTERNAL_SENDER_PROMOTION_MIN_COUNT || 3));
+  const minDomainCount = Math.max(2, Number(process.env.EXTERNAL_SENDER_DOMAIN_PROMOTION_MIN_COUNT || 6));
+  const allowDomainPromotion = String(process.env.ALLOW_EXTERNAL_SENDER_DOMAIN_PROMOTION || 'false').toLowerCase() === 'true';
+
+  const strongProofCount = Number(entry.linkMatchesBrandDomainCount || 0) + Number(entry.listIdMatchesBrandCount || 0);
+  const canPromoteEmail = Number(entry.evidenceCount || 0) >= minEmailCount && strongProofCount > 0;
+
+  if (canPromoteEmail) {
+    const knownEmails = new Set((brand.knownSenderEmails || []).map((value) => String(value).toLowerCase()));
+    if (!knownEmails.has(senderEmail)) {
+      knownEmails.add(senderEmail);
+      brand.knownSenderEmails = Array.from(knownEmails);
+      entry.promotedEmailAt = entry.promotedEmailAt || new Date();
+      entry.reviewStatus = 'approved';
+      entry.reviewedAt = entry.reviewedAt || new Date();
+      const history = brand.senderEmailHistory || [];
+      if (!history.find((row) => row.email === senderEmail)) {
+        history.push({
+          email: senderEmail,
+          reason: 'manual',
+          firstSeenAt: new Date(),
+          lastSeenAt: new Date()
+        });
+      }
+      brand.senderEmailHistory = history;
+    }
+  }
+
+  if (allowDomainPromotion && senderApexDomain) {
+    const canPromoteDomain = Number(entry.evidenceCount || 0) >= minDomainCount && Number(entry.linkMatchesBrandDomainCount || 0) >= minEmailCount;
+    if (canPromoteDomain) {
+      const knownDomains = new Set((brand.knownSenderDomains || []).map((value) => String(value).toLowerCase()));
+      if (!knownDomains.has(senderApexDomain)) {
+        knownDomains.add(senderApexDomain);
+        brand.knownSenderDomains = Array.from(knownDomains);
+        entry.promotedDomainAt = entry.promotedDomainAt || new Date();
+        entry.reviewStatus = 'approved';
+        entry.reviewedAt = entry.reviewedAt || new Date();
+      }
+    }
+  }
+}
+
+async function resolveSingleLinkSnapshot(url) {
+  const originalUrl = String(url || '').trim();
+  if (!/^https?:\/\//i.test(originalUrl)) {
+    return {
+      originalUrl,
+      originalDomain: extractDomainFromUrl(originalUrl),
+      finalUrl: null,
+      finalDomain: null,
+      resolvedAt: new Date(),
+      statusCode: null,
+      error: 'invalid_url'
+    };
+  }
+
+  const timeout = Number(process.env.LINK_RESOLUTION_TIMEOUT_MS || 5000);
+  try {
+    let res;
+    try {
+      res = await axios.head(originalUrl, {
+        timeout,
+        maxRedirects: 8,
+        validateStatus: () => true
+      });
+    } catch (_) {
+      res = await axios.get(originalUrl, {
+        timeout,
+        maxRedirects: 8,
+        validateStatus: () => true
+      });
+    }
+    const finalUrl = res?.request?.res?.responseUrl || originalUrl;
+    return {
+      originalUrl,
+      originalDomain: extractDomainFromUrl(originalUrl),
+      finalUrl,
+      finalDomain: extractDomainFromUrl(finalUrl),
+      resolvedAt: new Date(),
+      statusCode: Number(res?.status || 0) || null,
+      error: null
+    };
+  } catch (err) {
+    return {
+      originalUrl,
+      originalDomain: extractDomainFromUrl(originalUrl),
+      finalUrl: null,
+      finalDomain: null,
+      resolvedAt: new Date(),
+      statusCode: Number(err?.response?.status || 0) || null,
+      error: err?.message || 'resolution_failed'
+    };
+  }
+}
+
+async function buildLinkSnapshots(links = []) {
+  const uniqueLinks = Array.from(new Set((links || []).map((url) => String(url || '').trim()).filter(Boolean)));
+  const maxLinks = Math.max(0, Number(process.env.LINK_RESOLUTION_MAX_LINKS || 5));
+  const selected = uniqueLinks.slice(0, maxLinks || uniqueLinks.length);
+  const enabled = String(process.env.LINK_RESOLUTION_ENABLED || 'false').toLowerCase() === 'true';
+
+  if (!selected.length) return [];
+  if (!enabled) {
+    return selected.map((originalUrl) => ({
+      originalUrl,
+      originalDomain: extractDomainFromUrl(originalUrl),
+      finalUrl: null,
+      finalDomain: null,
+      resolvedAt: null,
+      statusCode: null,
+      error: 'resolution_disabled'
+    }));
+  }
+
+  const snapshots = [];
+  for (const link of selected) {
+    // Intentionally sequential to avoid aggressive bursts during full-history scans.
+    snapshots.push(await resolveSingleLinkSnapshot(link));
+  }
+  return snapshots;
+}
+
+async function enqueueManualReview({
+  emailMessage,
+  parsed,
+  reason,
+  candidateBrand = null,
+  matchSource = 'unknown',
+  matchConfidence = 0
+}) {
+  try {
+    const db = EmailMessage.db;
+    const queue = db.collection('manual_review_queue');
+    const now = new Date();
+    await queue.updateOne(
+      { gmailMessageId: emailMessage.gmailMessageId },
+      {
+        $set: {
+          emailMessageId: emailMessage._id,
+          gmailMessageId: emailMessage.gmailMessageId,
+          fromEmail: emailMessage.fromEmail || null,
+          fromDomain: emailMessage.fromDomain || null,
+          subject: emailMessage.subject || null,
+          receivedAt: emailMessage.receivedAt || null,
+          reason,
+          matchSource,
+          matchConfidence,
+          threshold: BRAND_MATCH_CONFIDENCE_THRESHOLD,
+          candidateBrandId: candidateBrand?._id || null,
+          candidateBrandName: candidateBrand?.name || null,
+          candidateBrandDomain: candidateBrand?.domain || null,
+          snippet: parsed?.snippet || emailMessage.snippet || null,
+          status: 'pending',
+          updatedAt: now
+        },
+        $setOnInsert: {
+          createdAt: now
+        }
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    logger.warn(`[scan_inbox] Failed to enqueue manual review for ${emailMessage.gmailMessageId}: ${err.message}`);
+  }
+}
+
+async function markUnresolvedForManualReview({
+  emailMessage,
+  parsed,
+  emailType,
+  reason,
+  matchSource = 'unknown',
+  matchConfidence = 0,
+  candidateBrand = null
+}) {
+  emailMessage.state = 'brand_unresolved';
+  emailMessage.needsReview = true;
+  emailMessage.processedBy.identity_resolver = {
+    done: false,
+    at: new Date(),
+    version: 'v2',
+    attempts: (emailMessage.processedBy?.identity_resolver?.attempts || 0) + 1,
+    status: 'skipped',
+    lastProcessedAt: new Date(),
+    error: reason
+  };
+  emailMessage.classificationConfidence = matchConfidence;
+  emailMessage.classificationReason = matchSource;
+  emailMessage.processingTrace = {
+    ...(emailMessage.processingTrace || {}),
+    resolve: {
+      at: new Date(),
+      status: 'manual_review',
+      reason,
+      source: matchSource,
+      confidence: matchConfidence,
+      threshold: BRAND_MATCH_CONFIDENCE_THRESHOLD
+    }
+  };
+  await emailMessage.save();
+  await enqueueManualReview({
+    emailMessage,
+    parsed,
+    reason,
+    candidateBrand,
+    matchSource,
+    matchConfidence
+  });
+  return { matched: false, emailType, manualReview: true };
 }
 
 function inferNewsletterLikeType(parsed, detectedType, brand) {
@@ -242,9 +527,15 @@ async function resolveBrand(senderEmail, senderDomain, links = []) {
 async function upsertEmailMessage(parsed) {
   const senderEmail = extractSenderEmail(parsed.from);
   const senderDomain = normalizeDomain(extractDomainFromEmail(senderEmail));
+  const senderApexDomain = getRegistrableDomain(senderDomain || '') || senderDomain || '';
+  const senderSubdomain = senderDomain && senderApexDomain && senderDomain !== senderApexDomain
+    ? senderDomain.replace(new RegExp(`\\.?${escapeRegex(senderApexDomain)}$`), '').replace(/\.$/, '')
+    : '';
   const emailType = classifyEmailType(parsed.subject, parsed.bodyText, parsed.bodyHtml);
+  const linkSnapshots = await buildLinkSnapshots(parsed.links || []);
   const receivedAt = parsed.internalDate ? new Date(Number(parsed.internalDate)) : new Date();
   const headers = {
+    ...(parsed.rawHeaders || {}),
     messageId: parsed.messageId || null,
     from: parsed.from || '',
     to: parsed.to || '',
@@ -256,22 +547,47 @@ async function upsertEmailMessage(parsed) {
     { gmailMessageId: parsed.id },
     {
       $set: {
+        gmailThreadHistoryId: parsed.historyId || null,
+        gmailLabelIds: parsed.labelIds || [],
+        gmailSizeEstimate: parsed.sizeEstimate || 0,
         threadId: parsed.threadId,
         from: parsed.from,
         fromEmail: senderEmail,
         fromDomain: senderDomain,
+        senderApexDomain,
+        senderSubdomain,
         to: parsed.to,
         subject: parsed.subject,
         snippet: parsed.snippet,
         receivedAt,
+        rfc822MessageId: parsed.messageId || null,
+        listUnsubscribe: parsed.listUnsubscribe || null,
+        listUnsubscribePost: parsed.listUnsubscribePost || null,
+        listId: parsed.listId || null,
+        precedence: parsed.precedence || null,
+        replyTo: parsed.replyTo || null,
+        returnPath: parsed.returnPath || null,
+        inReplyTo: parsed.inReplyTo || null,
+        references: parsed.references || null,
+        authenticationResults: parsed.authenticationResults || null,
+        espHeaders: parsed.espHeaders || {},
+        attachmentMetadata: parsed.attachments || [],
+        mimeMeta: parsed.mimeMeta || {},
         textBody: parsed.bodyText,
         htmlBody: parsed.bodyHtml,
         bodyText: parsed.bodyText,
         bodyHtml: parsed.bodyHtml,
         headers,
         links: parsed.links || [],
+        linkSnapshots,
         emailType,
-        state: 'parsed'
+        state: 'parsed',
+        processingTrace: {
+          scan: {
+            at: new Date(),
+            source: 'scan_inbox'
+          }
+        }
       },
       $setOnInsert: {
         processedBy: {
@@ -296,30 +612,39 @@ async function processSingleMessage(messageId) {
   let brand = await resolveBrand(senderEmail, senderDomain, parsed.links || []);
   let matchSource = 'direct';
   let matchConfidence = 10;
+  let candidateBrand = null;
   if (!brand) {
     const inferred = await resolveBrandByContentReference(parsed, senderDomain, emailType);
     if (inferred?.brand) {
-      brand = inferred.brand;
+      candidateBrand = inferred.brand;
       matchSource = inferred.source || 'content_reference';
       matchConfidence = inferred.confidence || 0;
-      logger.info(`[scan_inbox] Content-based brand match: "${parsed.subject || ''}" -> ${brand.name} (${matchSource}, confidence=${matchConfidence})`);
+      logger.info(`[scan_inbox] Content-based brand candidate: "${parsed.subject || ''}" -> ${candidateBrand.name} (${matchSource}, confidence=${matchConfidence})`);
+      if (matchConfidence >= BRAND_MATCH_CONFIDENCE_THRESHOLD) {
+        brand = candidateBrand;
+      } else {
+        return markUnresolvedForManualReview({
+          emailMessage,
+          parsed,
+          emailType,
+          reason: 'low_confidence_match',
+          matchSource,
+          matchConfidence,
+          candidateBrand
+        });
+      }
     }
   }
 
   if (!brand) {
-    emailMessage.state = 'brand_unresolved';
-    emailMessage.needsReview = true;
-    emailMessage.processedBy.identity_resolver = {
-      done: false,
-      at: new Date(),
-      version: 'v1',
-      attempts: (emailMessage.processedBy?.identity_resolver?.attempts || 0) + 1,
-      status: 'skipped',
-      lastProcessedAt: new Date(),
-      error: 'No brand match found'
-    };
-    await emailMessage.save();
-    return { matched: false, emailType };
+    return markUnresolvedForManualReview({
+      emailMessage,
+      parsed,
+      emailType,
+      reason: 'no_brand_match',
+      matchSource: 'none',
+      matchConfidence: 0
+    });
   }
 
   const effectiveEmailType = inferNewsletterLikeType(parsed, emailType, brand);
@@ -329,6 +654,17 @@ async function processSingleMessage(messageId) {
 
   emailMessage.brandId = brand._id;
   emailMessage.state = 'brand_resolved';
+  emailMessage.classificationConfidence = matchConfidence;
+  emailMessage.classificationReason = matchSource;
+  emailMessage.processingTrace = {
+    ...(emailMessage.processingTrace || {}),
+    resolve: {
+      at: new Date(),
+      status: 'resolved',
+      reason: matchSource,
+      confidence: matchConfidence
+    }
+  };
   emailMessage.processedBy.identity_resolver = {
     done: true,
     at: new Date(),
@@ -338,6 +674,25 @@ async function processSingleMessage(messageId) {
     lastProcessedAt: new Date(),
     error: null
   };
+
+  const senderApexDomain = getRegistrableDomain(senderDomain || '') || senderDomain || '';
+  if (shouldTrackAsExternalSender(senderDomain, brand.domain)) {
+    const listIdDomain = extractListIdDomain(parsed.listId || '');
+    const listIdMatchesBrand = !!(listIdDomain && domainsRelated(listIdDomain, brand.domain));
+    const linkMatchCount = countDomainMatchInSnapshots(emailMessage.linkSnapshots || [], brand.domain);
+    const linkMatchesBrand = linkMatchCount > 0;
+
+    const evidence = upsertExternalSenderEvidence(brand, {
+      senderEmail,
+      senderDomain,
+      senderApexDomain,
+      matchSource,
+      matchConfidence,
+      linkMatchesBrand,
+      listIdMatchesBrand
+    });
+    maybePromoteExternalSenderAlias(brand, evidence, senderEmail, senderApexDomain);
+  }
 
   // Only newsletter emails define the "true" sender identity for a brand.
   if (effectiveEmailType === 'newsletter' &&
@@ -427,8 +782,17 @@ async function processInbox({ hours = 24, maxResults = 100 } = {}) {
   logger.info(`[scan_inbox] Querying Gmail: ${query}`);
   const refs = await searchMessages(query, maxResults);
 
-  const stats = {
-    fetched: refs.length,
+  const stats = buildScanStats(refs.length);
+  await processMessageRefs(refs, stats, 'scan_inbox');
+
+  logger.info(`[scan_inbox] Completed: ${JSON.stringify(stats)}`);
+  return stats;
+}
+
+function buildScanStats(fetched = 0) {
+  return {
+    fetched,
+    pages: 0,
     processed: 0,
     skippedAlreadyFinalized: 0,
     matched: 0,
@@ -442,7 +806,9 @@ async function processInbox({ hours = 24, maxResults = 100 } = {}) {
       unknown: 0
     }
   };
+}
 
+async function processMessageRefs(refs, stats, logPrefix) {
   for (const ref of refs) {
     try {
       const existing = await EmailMessage.findOne({ gmailMessageId: ref.id })
@@ -459,15 +825,58 @@ async function processInbox({ hours = 24, maxResults = 100 } = {}) {
       stats.byType[result.emailType] = (stats.byType[result.emailType] || 0) + 1;
       await sleep(120);
     } catch (err) {
-      logger.warn(`[scan_inbox] Failed to process message ${ref.id}: ${err.message}`);
+      logger.warn(`[${logPrefix}] Failed to process message ${ref.id}: ${err.message}`);
     }
   }
+}
 
-  logger.info(`[scan_inbox] Completed: ${JSON.stringify(stats)}`);
+async function processInboxFullHistory({
+  maxResults = 0,
+  pageSize = 500,
+  query = null
+} = {}) {
+  const gmail = await getGmailClient();
+  const baseQuery = String(query || `to:${process.env.GMAIL_USER} in:inbox`);
+  const safePageSize = Math.max(1, Math.min(500, Number(pageSize) || 500));
+  const cap = Math.max(0, Number(maxResults) || 0);
+  const stats = buildScanStats(0);
+
+  let pageToken = null;
+  let fetchedTotal = 0;
+
+  logger.info(`[scan_inbox_full_history] Querying Gmail from inception: ${baseQuery}`);
+
+  do {
+    if (cap > 0 && fetchedTotal >= cap) break;
+    const remaining = cap > 0 ? cap - fetchedTotal : safePageSize;
+    const currentMax = cap > 0 ? Math.min(safePageSize, remaining) : safePageSize;
+    if (currentMax <= 0) break;
+
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: baseQuery,
+      maxResults: currentMax,
+      pageToken: pageToken || undefined
+    });
+
+    const refs = res.data?.messages || [];
+    stats.pages += 1;
+    stats.fetched += refs.length;
+    fetchedTotal += refs.length;
+
+    if (!refs.length) break;
+    logger.info(`[scan_inbox_full_history] Processing page ${stats.pages} with ${refs.length} messages (total fetched: ${fetchedTotal})`);
+    await processMessageRefs(refs, stats, 'scan_inbox_full_history');
+
+    pageToken = res.data?.nextPageToken || null;
+  } while (pageToken);
+
+  logger.info(`[scan_inbox_full_history] Completed: ${JSON.stringify(stats)}`);
   return stats;
 }
 
 module.exports = {
   processInbox,
-  processSingleMessage
+  processSingleMessage,
+  processInboxFullHistory
 };

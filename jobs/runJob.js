@@ -2,9 +2,9 @@ require('dotenv').config();
 
 const { connectDB } = require('../config/database');
 const { run } = require('../agents/brandOnboardingAgent');
-const { processInbox } = require('../services/inboxProcessor');
+const { processInbox, processInboxFullHistory } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
-const { ingestPendingNewsletters } = require('../services/newsletterIngestor');
+const { ingestPendingNewsletters, backfillListingsFromEmailMessages } = require('../services/newsletterIngestor');
 
 async function runJob(job, options = {}) {
   switch (job) {
@@ -20,6 +20,12 @@ async function runJob(job, options = {}) {
         hours: Number(options.inboxHours || options.hours || process.env.SCAN_HOURS || 24),
         maxResults: Number(options.maxInboxResults || options.maxResults || process.env.SCAN_MAX_RESULTS || 100)
       });
+    case 'scan_inbox_full_history':
+      return processInboxFullHistory({
+        maxResults: Number(options.maxResults || process.env.SCAN_FULL_MAX_RESULTS || 0),
+        pageSize: Number(options.pageSize || process.env.SCAN_FULL_PAGE_SIZE || 500),
+        query: options.query || process.env.SCAN_FULL_QUERY || null
+      });
     case 'process_confirmations':
       return processPendingConfirmations({
         limit: Number(options.limit || process.env.CONFIRMATION_LIMIT || 50)
@@ -27,6 +33,12 @@ async function runJob(job, options = {}) {
     case 'ingest_newsletters':
       return ingestPendingNewsletters({
         limit: Number(options.limit || process.env.INGEST_LIMIT || 50)
+      });
+    case 'backfill_listings':
+      return backfillListingsFromEmailMessages({
+        limit: Number(options.limit || process.env.BACKFILL_LIMIT || 500),
+        withScreenshots: String(options.withScreenshots ?? process.env.BACKFILL_WITH_SCREENSHOTS ?? 'false') === 'true',
+        forceUpdate: String(options.forceUpdate ?? process.env.BACKFILL_FORCE_UPDATE ?? 'false') === 'true'
       });
     default:
       throw new Error(`Unknown job: ${job}`);
@@ -36,7 +48,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|process_confirmations|ingest_newsletters>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings>');
     process.exit(1);
   }
 

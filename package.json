@@ -9,8 +9,11 @@
           "agent": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node index.js --cli",
           "job:discover": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runJob.js discover_and_signup",
           "job:scan-inbox": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runJob.js scan_inbox",
+          "job:scan-full": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runJob.js scan_inbox_full_history",
           "job:confirm": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runJob.js process_confirmations",
           "job:ingest": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runJob.js ingest_newsletters",
+          "job:backfill": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runJob.js backfill_listings",
+          "job:migrate": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runMigration.js",
           "job:cycle": "export LD_LIBRARY_PATH=./.local-libs/usr/lib/x86_64-linux-gnu:./.local-libs/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH && node jobs/runSimplifiedPlan.js",
           "check": "node --check agents/brandOnboardingAgent.js && node --check routes/api.js && node --check models/EmailMessage.js && node --check services/inboxProcessor.js && node --check services/confirmationProcessor.js && node --check services/newsletterIngestor.js && node --check jobs/runJob.js && node --check jobs/runSimplifiedPlan.js",
           "postinstall": "npx playwright install chromium"

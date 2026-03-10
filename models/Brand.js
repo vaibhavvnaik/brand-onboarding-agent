@@ -30,6 +30,30 @@ const SignupAttemptSchema = new mongoose.Schema({
   diagnostic: { type: mongoose.Schema.Types.Mixed, default: null }
 }, { _id: false });
 
+// --- External Sender Evidence (ESP alias tracking) --------------
+const ExternalSenderEvidenceSchema = new mongoose.Schema({
+  senderEmail: { type: String, required: true, lowercase: true, trim: true },
+  senderDomain: { type: String, lowercase: true, trim: true },
+  senderApexDomain: { type: String, lowercase: true, trim: true },
+  firstSeenAt: { type: Date, default: Date.now },
+  lastSeenAt: { type: Date, default: Date.now },
+  evidenceCount: { type: Number, default: 1 },
+  linkMatchesBrandDomainCount: { type: Number, default: 0 },
+  listIdMatchesBrandCount: { type: Number, default: 0 },
+  highConfidenceMatchCount: { type: Number, default: 0 },
+  lastMatchSource: String,
+  lastMatchConfidence: Number,
+  promotedEmailAt: Date,
+  promotedDomainAt: Date,
+  reviewStatus: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    default: 'pending'
+  },
+  reviewedAt: Date,
+  reviewNotes: String
+}, { _id: false });
+
 // --- Main Brand Schema -----------------------------------------
 const BrandSchema = new mongoose.Schema({
 
@@ -49,6 +73,7 @@ const BrandSchema = new mongoose.Schema({
   primarySenderDomain: String,
   knownSenderEmails:   [{ type: String, lowercase: true, trim: true }],
   knownSenderDomains:  [{ type: String, lowercase: true, trim: true }],
+  externalSenderEvidence: [ExternalSenderEvidenceSchema],
   welcomeSenderEmails: [{ type: String, lowercase: true, trim: true }],
   senderEmailHistory:  [SenderEmailHistorySchema],
   signupFormUrl:       String,   // Exact URL where form was located

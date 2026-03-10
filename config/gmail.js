@@ -115,16 +115,86 @@ async function getMessage(messageId) {
   return res.data;
 }
 
+function getHeaderValue(headers = [], key = '') {
+  const wanted = String(key || '').toLowerCase();
+  const row = (headers || []).find((h) => String(h?.name || '').toLowerCase() === wanted);
+  return row?.value || '';
+}
+
+function parseCharset(contentType = '') {
+  const match = String(contentType || '').match(/charset="?([^";\s]+)"?/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+function collectEspHeaders(rawHeaders = {}) {
+  const out = {};
+  const keys = Object.keys(rawHeaders || {});
+  const interesting = [
+    'x-mailer',
+    'feedback-id',
+    'x-campaign',
+    'x-mailchimp',
+    'x-mc-',
+    'x-klaviyo',
+    'x-sg-',
+    'x-ses-',
+    'x-sendgrid',
+    'x-postmark',
+    'x-customerio',
+    'x-ctct'
+  ];
+  for (const key of keys) {
+    const low = key.toLowerCase();
+    if (interesting.some((prefix) => low === prefix || low.startsWith(prefix))) {
+      out[low] = rawHeaders[key];
+    }
+  }
+  return out;
+}
+
 function parseMessage(msg) {
   const headers = {};
   (msg.payload?.headers || []).forEach(h => { headers[h.name.toLowerCase()] = h.value; });
   const bodyParts = [];
-  function extractParts(part) {
+  const attachments = [];
+  const mimeTypes = [];
+  const charsets = new Set();
+
+  function extractParts(part, partPath = '0') {
     if (!part) return;
-    if (part.body?.data) bodyParts.push({ mimeType: part.mimeType || 'text/plain', content: Buffer.from(part.body.data, 'base64').toString('utf8') });
-    (part.parts || []).forEach(extractParts);
+    const mimeType = part.mimeType || 'text/plain';
+    const partHeaders = part.headers || [];
+    const contentType = getHeaderValue(partHeaders, 'content-type');
+    const contentDisposition = getHeaderValue(partHeaders, 'content-disposition');
+    const contentId = getHeaderValue(partHeaders, 'content-id');
+    const charset = parseCharset(contentType);
+    if (charset) charsets.add(charset);
+    mimeTypes.push(mimeType);
+
+    if (part.body?.data) {
+      bodyParts.push({
+        mimeType,
+        content: Buffer.from(part.body.data, 'base64').toString('utf8')
+      });
+    }
+
+    const hasAttachment = Boolean(part?.body?.attachmentId || part?.filename);
+    if (hasAttachment) {
+      attachments.push({
+        partPath,
+        filename: part.filename || '',
+        mimeType,
+        size: Number(part?.body?.size || 0),
+        attachmentId: part?.body?.attachmentId || null,
+        contentId: contentId || null,
+        contentDisposition: contentDisposition || null,
+        inline: /inline/i.test(contentDisposition)
+      });
+    }
+
+    (part.parts || []).forEach((child, index) => extractParts(child, `${partPath}.${index}`));
   }
-  extractParts(msg.payload);
+  extractParts(msg.payload, '0');
   const htmlPart = bodyParts.find(p => p.mimeType === 'text/html');
   const links = [];
   if (htmlPart) {
@@ -137,6 +207,31 @@ function parseMessage(msg) {
   return {
     id: msg.id, threadId: msg.threadId, from: headers['from'] || '', to: headers['to'] || '',
     subject: headers['subject'] || '', date: headers['date'] || '',
+    rawHeaders: headers,
+    messageId: headers['message-id'] || '',
+    listUnsubscribe: headers['list-unsubscribe'] || '',
+    listUnsubscribePost: headers['list-unsubscribe-post'] || '',
+    listId: headers['list-id'] || '',
+    precedence: headers['precedence'] || '',
+    replyTo: headers['reply-to'] || '',
+    returnPath: headers['return-path'] || '',
+    inReplyTo: headers['in-reply-to'] || '',
+    references: headers.references || '',
+    authenticationResults: headers['authentication-results'] || '',
+    espHeaders: collectEspHeaders(headers),
+    historyId: msg.historyId || '',
+    labelIds: msg.labelIds || [],
+    sizeEstimate: msg.sizeEstimate || 0,
+    attachments,
+    mimeMeta: {
+      topMimeType: msg?.payload?.mimeType || '',
+      partCount: mimeTypes.length,
+      htmlPartCount: bodyParts.filter((p) => p.mimeType === 'text/html').length,
+      textPartCount: bodyParts.filter((p) => p.mimeType === 'text/plain').length,
+      attachmentCount: attachments.length,
+      mimeTypes: Array.from(new Set(mimeTypes)),
+      charsets: Array.from(charsets)
+    },
     bodyText: bodyParts.find(p => p.mimeType === 'text/plain')?.content || '',
     bodyHtml: htmlPart?.content || '', links: [...new Set(links)],
     snippet: msg.snippet || '', internalDate: msg.internalDate

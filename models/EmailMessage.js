@@ -16,14 +16,33 @@ const ProcessorStateSchema = new mongoose.Schema({
 
 const EmailMessageSchema = new mongoose.Schema({
   gmailMessageId: { type: String, required: true, unique: true },
+  gmailThreadHistoryId: String,
+  gmailLabelIds: [String],
+  gmailSizeEstimate: Number,
   threadId: String,
   from: String,
   fromEmail: String,
   fromDomain: String,
+  senderApexDomain: String,
+  senderSubdomain: String,
   to: String,
   subject: String,
   snippet: String,
   receivedAt: Date,
+  rfc822MessageId: String,
+  listUnsubscribe: String,
+  listUnsubscribePost: String,
+  listId: String,
+  precedence: String,
+  replyTo: String,
+  returnPath: String,
+  inReplyTo: String,
+  references: String,
+  authenticationResults: String,
+  espHeaders: { type: mongoose.Schema.Types.Mixed, default: {} },
+  attachmentMetadata: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  mimeMeta: { type: mongoose.Schema.Types.Mixed, default: {} },
+  linkSnapshots: { type: [mongoose.Schema.Types.Mixed], default: [] },
   textBody: String,
   htmlBody: String,
   bodyText: String,
@@ -36,6 +55,8 @@ const EmailMessageSchema = new mongoose.Schema({
     enum: ['confirmation', 'welcome', 'newsletter', 'transactional', 'other', 'unknown'],
     default: 'unknown'
   },
+  classificationConfidence: Number,
+  classificationReason: String,
 
   state: {
     type: String,
@@ -72,6 +93,7 @@ const EmailMessageSchema = new mongoose.Schema({
 
   screenshotPath: String,
   ingestedAt: Date,
+  processingTrace: { type: mongoose.Schema.Types.Mixed, default: {} },
 
   processedBy: {
     identity_resolver: { type: ProcessorStateSchema, default: () => ({}) },
@@ -85,6 +107,8 @@ const EmailMessageSchema = new mongoose.Schema({
 
 EmailMessageSchema.index({ emailType: 1, receivedAt: -1 });
 EmailMessageSchema.index({ brandId: 1, receivedAt: -1 });
+EmailMessageSchema.index({ rfc822MessageId: 1 });
+EmailMessageSchema.index({ senderApexDomain: 1, receivedAt: -1 });
 EmailMessageSchema.index({ 'processedBy.identity_resolver.status': 1 });
 EmailMessageSchema.index({ 'processedBy.confirmation_runner.status': 1 });
 EmailMessageSchema.index({ 'processedBy.fnl_reader.status': 1 });
