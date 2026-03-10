@@ -19,6 +19,7 @@ const logger = require('../utils/logger');
 const ActivityLog = require('../models/ActivityLog');
 const WorkflowRun = require('../models/WorkflowRun');
 const { appendActivityLog } = require('../utils/activityLog');
+const { getPlaywrightRuntimeStatus, ensurePlaywrightRuntimeReady } = require('../utils/runtimePreflight');
 
 // -- Live Log System --------------------------------------------
 const agentEmitter = new EventEmitter();
@@ -220,6 +221,26 @@ router.get('/activity/workflow-runs', async (req, res) => {
   }
 });
 
+/** GET /api/runtime/playwright-status */
+router.get('/runtime/playwright-status', async (req, res) => {
+  try {
+    const status = getPlaywrightRuntimeStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/runtime/playwright-preflight */
+router.post('/runtime/playwright-preflight', async (req, res) => {
+  try {
+    const status = await ensurePlaywrightRuntimeReady({ autoInstall: true });
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /** GET /api/activity/newsletters?limit=40 */
 router.get('/activity/newsletters', async (req, res) => {
   try {
@@ -398,6 +419,22 @@ router.get('/brands/:id', async (req, res) => {
     if (!brand) return res.status(404).json({ error: 'Brand not found' });
     res.json(brand);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/brands/:id/signup-failure-screenshot', async (req, res) => {
+  try {
+    const brand = await Brand.findById(req.params.id).select('signupFailureScreenshotPath');
+    if (!brand || !brand.signupFailureScreenshotPath) {
+      return res.status(404).json({ error: 'Screenshot not found' });
+    }
+    const shotPath = path.resolve(brand.signupFailureScreenshotPath);
+    if (!fs.existsSync(shotPath)) {
+      return res.status(404).json({ error: 'Screenshot file missing on server' });
+    }
+    res.sendFile(shotPath);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.patch('/brands/:id', async (req, res) => {

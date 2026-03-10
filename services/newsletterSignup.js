@@ -6,8 +6,12 @@
 
 const { chromium } = require('playwright');
 const cheerio = require('cheerio');
+const fs = require('fs');
+const path = require('path');
 const { generateProfile, matchFieldToProfile } = require('../utils/humanizer');
 const { detectFromHtml, extractKlaviyoCompanyId } = require('../utils/espDetector');
+const { classifySignupFailure } = require('../utils/signupFailure');
+const { ensurePlaywrightRuntimeReady } = require('../utils/runtimePreflight');
 const logger = require('../utils/logger');
 const axios = require('axios');
 
@@ -16,6 +20,7 @@ const EMAIL = process.env.GMAIL_USER || 'victor.fire1980@gmail.com';
 
 // Hard cap per brand: 3 minutes
 const SIGNUP_TIMEOUT_MS = 3 * 60 * 1000;
+const SIGNUP_FAILURE_ARTIFACT_DIR = path.join(__dirname, '../artifacts/signup-failures');
 
 // -- Selector pools for finding newsletter forms ----------------
 const FORM_SELECTORS = [
@@ -67,9 +72,27 @@ const SIGNUP_PAGE_PATTERNS = [
  * Wraps core logic with a hard 3-minute timeout so it can never hang indefinitely.
  * @param {string} websiteUrl
  * @param {string} brandName
- * @returns {Object} result: { success, formUrl, espProvider, strategy, error }
+ * @returns {Object} result: { success, formUrl, espProvider, strategy, error, failureCategory, failureCode, attemptTrace, failureScreenshotPath }
  */
 async function signUpForNewsletter(websiteUrl, brandName) {
+  const runtime = await ensurePlaywrightRuntimeReady({ autoInstall: true });
+  if (!runtime.ready) {
+    const reason = runtime.reason || 'Playwright runtime preflight failed';
+    const classified = classifySignupFailure(reason);
+    logger.warn(`[EMAIL] Runtime preflight failed for ${brandName}: ${reason}`);
+    return {
+      success: false,
+      formUrl: websiteUrl,
+      espProvider: 'unknown',
+      strategy: null,
+      error: reason,
+      failureCategory: classified.category,
+      failureCode: classified.code,
+      attemptTrace: [{ strategy: 'runtime_preflight', success: false, durationMs: 0, reason }],
+      failureScreenshotPath: null
+    };
+  }
+
   const timeoutPromise = new Promise((_, reject) =>
     setTimeout(
       () => reject(new Error(`Hard timeout: signup for ${brandName} exceeded 3 minutes`)),
@@ -87,6 +110,10 @@ async function signUpForNewsletter(websiteUrl, brandName) {
       espProvider: 'unknown',
       strategy: null,
       error: err.message,
+      failureCategory: 'automation_timeout',
+      failureCode: 'hard_timeout',
+      attemptTrace: [],
+      failureScreenshotPath: null
     };
   }
 }
@@ -99,9 +126,24 @@ async function _signUpCore(websiteUrl, brandName) {
     formUrl: null,
     espProvider: 'unknown',
     strategy: null,
-    error: null
+    error: null,
+    failureCategory: null,
+    failureCode: null,
+    attemptTrace: [],
+    failureScreenshotPath: null
   };
   let browser = null;
+  let page = null;
+
+  const recordAttempt = (strategy, res, startedAt) => {
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    result.attemptTrace.push({
+      strategy,
+      success: !!(res && res.success),
+      durationMs,
+      reason: (res && res.reason) || null
+    });
+  };
 
   logger.info(`\n[EMAIL] Signing up for: ${brandName} (${websiteUrl})`);
 
@@ -126,12 +168,14 @@ async function _signUpCore(websiteUrl, brandName) {
 
     await context.route(/google-analytics|googletagmanager|facebook\.net|hotjar|intercom/, r => r.abort());
 
-    const page = await context.newPage();
+    page = await context.newPage();
     page.setDefaultTimeout(20000);
 
     // -- Strategy 1: dedicated signup/newsletter page ----------
     logger.info(`[EMAIL] ${brandName}: trying Strategy 1 (dedicated signup page)`);
+    let startedAt = Date.now();
     const signupPageResult = await tryDedicatedSignupPage(page, websiteUrl, profile, brandName);
+    recordAttempt('dedicated_page', signupPageResult, startedAt);
     if (signupPageResult.success) {
       result.success = true;
       result.formUrl = signupPageResult.formUrl;
@@ -142,7 +186,9 @@ async function _signUpCore(websiteUrl, brandName) {
 
     // -- Strategy 2: footer form on homepage -------------------
     logger.info(`[EMAIL] ${brandName}: trying Strategy 2 (footer form)`);
+    startedAt = Date.now();
     const footerResult = await tryFooterForm(page, websiteUrl, profile, brandName);
+    recordAttempt('footer_form', footerResult, startedAt);
     if (footerResult.success) {
       result.success = true;
       result.formUrl = footerResult.formUrl;
@@ -153,7 +199,9 @@ async function _signUpCore(websiteUrl, brandName) {
 
     // -- Strategy 2b: contextual form anywhere on homepage ------
     logger.info(`[EMAIL] ${brandName}: trying Strategy 2b (contextual email form)`);
+    startedAt = Date.now();
     const contextualResult = await tryContextualForm(page, websiteUrl, profile, brandName);
+    recordAttempt('contextual_form', contextualResult, startedAt);
     if (contextualResult.success) {
       result.success = true;
       result.formUrl = contextualResult.formUrl;
@@ -164,7 +212,9 @@ async function _signUpCore(websiteUrl, brandName) {
 
     // -- Strategy 3: trigger and fill email popup --------------
     logger.info(`[EMAIL] ${brandName}: trying Strategy 3 (popup trigger)`);
+    startedAt = Date.now();
     const popupResult = await tryPopupForm(page, websiteUrl, profile, brandName);
+    recordAttempt('popup', popupResult, startedAt);
     if (popupResult.success) {
       result.success = true;
       result.formUrl = popupResult.formUrl;
@@ -182,7 +232,9 @@ async function _signUpCore(websiteUrl, brandName) {
     if (espDetected === 'klaviyo') {
       const companyId = extractKlaviyoCompanyId(pageSource);
       if (companyId) {
+        startedAt = Date.now();
         const klaviyoResult = await tryKlaviyoApi(companyId, profile.email, brandName);
+        recordAttempt('esp_api_klaviyo', klaviyoResult, startedAt);
         if (klaviyoResult.success) {
           result.success = true;
           result.strategy = 'esp_api_klaviyo';
@@ -195,7 +247,9 @@ async function _signUpCore(websiteUrl, brandName) {
     // -- Strategy 5: Mailchimp embedded form ------------------
     logger.info(`[EMAIL] ${brandName}: trying Strategy 5 (Mailchimp form)`);
     if (espDetected === 'mailchimp') {
+      startedAt = Date.now();
       const mailchimpResult = await tryMailchimpForm(page, profile);
+      recordAttempt('mailchimp_form', mailchimpResult, startedAt);
       if (mailchimpResult.success) {
         result.success = true;
         result.strategy = 'mailchimp_form';
@@ -206,6 +260,9 @@ async function _signUpCore(websiteUrl, brandName) {
 
     logger.info(`[EMAIL] ${brandName}: all strategies exhausted, no form found`);
     result.error = 'No signup form found after all strategies exhausted';
+    const classified = classifySignupFailure(result.error, result.strategy);
+    result.failureCategory = classified.category;
+    result.failureCode = classified.code;
 
   } catch (err) {
     if (err.message.includes('captcha') || err.message.includes('CAPTCHA')) {
@@ -215,16 +272,37 @@ async function _signUpCore(websiteUrl, brandName) {
     } else {
       result.error = err.message;
     }
+    const classified = classifySignupFailure(result.error, result.strategy);
+    result.failureCategory = classified.category;
+    result.failureCode = classified.code;
     logger.warn(`Signup error for ${brandName}: ${result.error}`);
 
     // Browser launch/system-lib issues: fallback to lightweight HTTP form submit.
     if (/browsertype\.launch|shared libraries|libnspr|executable doesn't exist/i.test(result.error || '')) {
       const httpFallback = await tryHttpSignupFallback(websiteUrl, brandName);
+      result.attemptTrace.push({
+        strategy: 'http_form_fallback',
+        success: !!httpFallback.success,
+        durationMs: 0,
+        reason: httpFallback.error || null
+      });
       if (httpFallback.success) {
         return httpFallback;
       }
     }
   } finally {
+    if (!result.success && page) {
+      try {
+        fs.mkdirSync(SIGNUP_FAILURE_ARTIFACT_DIR, { recursive: true });
+        const safeBrand = String(brandName || 'brand').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        const fileName = `${safeBrand || 'brand'}-${Date.now()}.png`;
+        const filePath = path.join(SIGNUP_FAILURE_ARTIFACT_DIR, fileName);
+        await page.screenshot({ path: filePath, fullPage: true, timeout: 10000 });
+        result.failureScreenshotPath = filePath;
+      } catch (shotErr) {
+        logger.debug(`Failure screenshot capture skipped for ${brandName}: ${shotErr.message}`);
+      }
+    }
     if (browser) await browser.close().catch(() => {});
   }
 
@@ -346,7 +424,7 @@ async function tryDedicatedSignupPage(page, baseUrl, profile, brandName) {
       continue;
     }
   }
-  return { success: false };
+  return { success: false, reason: 'dedicated_page_no_newsletter_form' };
 }
 
 async function tryFooterForm(page, websiteUrl, profile, brandName) {
@@ -375,7 +453,7 @@ async function tryFooterForm(page, websiteUrl, profile, brandName) {
   } catch (err) {
     logger.debug(`Footer form strategy failed: ${err.message}`);
   }
-  return { success: false };
+  return { success: false, reason: 'footer_newsletter_form_not_found' };
 }
 
 async function tryPopupForm(page, websiteUrl, profile, brandName) {
@@ -397,7 +475,7 @@ async function tryPopupForm(page, websiteUrl, profile, brandName) {
     await sleep(700);
 
     const emailInput = await findEmailInput(page, { requireNewsletterContext: true });
-    if (!emailInput) return { success: false };
+    if (!emailInput) return { success: false, reason: 'popup_email_input_not_found' };
 
     const success = await fillEmailForm(page, profile, brandName, emailInput);
     if (success) {
@@ -406,7 +484,7 @@ async function tryPopupForm(page, websiteUrl, profile, brandName) {
   } catch (err) {
     logger.debug(`Popup strategy failed: ${err.message}`);
   }
-  return { success: false };
+  return { success: false, reason: 'popup_submission_failed' };
 }
 
 async function tryContextualForm(page, websiteUrl, profile, brandName) {
@@ -419,13 +497,13 @@ async function tryContextualForm(page, websiteUrl, profile, brandName) {
     await dismissOverlays(page);
     await sleep(600);
     const emailInput = await findEmailInput(page, { requireNewsletterContext: true });
-    if (!emailInput) return { success: false };
+    if (!emailInput) return { success: false, reason: 'contextual_email_input_not_found' };
     const success = await fillEmailForm(page, profile, brandName, emailInput);
-    if (!success) return { success: false };
+    if (!success) return { success: false, reason: 'contextual_form_submit_failed' };
     return { success: true, formUrl: websiteUrl, espProvider: detectFromHtml(await page.content()) };
   } catch (err) {
     logger.debug(`Contextual form strategy failed: ${err.message}`);
-    return { success: false };
+    return { success: false, reason: 'contextual_strategy_exception' };
   }
 }
 
@@ -713,17 +791,17 @@ async function tryKlaviyoApi(companyId, email, brandName) {
     const data = response.data;
     const success = data?.success === true || data?.result === 'added' || data?.result === 'already_in_list';
     if (success) logger.info(` [OK] ${brandName}: Klaviyo API signup successful`);
-    return { success };
+    return { success, reason: success ? null : 'klaviyo_api_rejected' };
   } catch (err) {
     logger.debug(`Klaviyo API fallback failed: ${err.message}`);
-    return { success: false };
+    return { success: false, reason: 'klaviyo_api_failed' };
   }
 }
 
 async function tryMailchimpForm(page, profile) {
   try {
     const emailInput = await page.$('#mce-EMAIL, input[name="EMAIL"]');
-    if (!emailInput || !await emailInput.isVisible()) return { success: false };
+    if (!emailInput || !await emailInput.isVisible()) return { success: false, reason: 'mailchimp_email_input_not_found' };
 
     await emailInput.fill(profile.email);
     await sleep(500);
@@ -737,9 +815,9 @@ async function tryMailchimpForm(page, profile) {
     if (submitBtn) await submitBtn.click({ delay: 100 });
 
     await sleep(2500);
-    return { success: true };
+    return { success: true, reason: null };
   } catch {
-    return { success: false };
+    return { success: false, reason: 'mailchimp_submit_failed' };
   }
 }
 

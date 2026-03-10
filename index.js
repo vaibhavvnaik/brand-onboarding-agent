@@ -26,6 +26,7 @@ const logger        = require('./utils/logger');
 const WorkflowRun   = require('./models/WorkflowRun');
 const { runJob }    = require('./jobs/runJob');
 const { appendActivityLog } = require('./utils/activityLog');
+const { ensurePlaywrightRuntimeReady } = require('./utils/runtimePreflight');
 const apiRoutes     = require('./routes/api');
 const adminRoutes   = require('./routes/admin');
 const setupRoutes   = require('./routes/setup');
@@ -263,6 +264,11 @@ function logDiscoveryRuntimeConfig() {
       .then(() => {
         logger.info('MongoDB connected successfully');
         logDiscoveryRuntimeConfig();
+        ensurePlaywrightRuntimeReady({ autoInstall: true }).then((runtime) => {
+          logger.info(`[runtime] Playwright ready=${runtime.ready} reason=${runtime.reason}`);
+        }).catch((err) => {
+          logger.error(`[runtime] Playwright preflight call failed: ${err.message}`);
+        });
         startInternalScheduler();
       })
       .catch(err => logger.error('MongoDB connection failed (server still running):', err.message));
