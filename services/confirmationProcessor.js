@@ -2,21 +2,11 @@ const Brand = require('../models/Brand');
 const EmailMessage = require('../models/EmailMessage');
 const { clickConfirmationLinkFromParsedMessage } = require('./emailConfirmation');
 const { extractSenderEmail, extractDomainFromEmail } = require('../config/gmail');
+const { normalizeDomain, getRegistrableDomain } = require('../utils/domainIdentity');
 const logger = require('../utils/logger');
-
-function normalizeDomain(domain) {
-  return String(domain || '').replace(/^www\./i, '').toLowerCase().trim();
-}
 
 function escapeRegex(input) {
   return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function getApexDomain(domain) {
-  const normalized = normalizeDomain(domain);
-  const parts = normalized.split('.').filter(Boolean);
-  if (parts.length < 2) return normalized;
-  return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
 }
 
 async function resolveBrandForMessage(message) {
@@ -36,11 +26,13 @@ async function resolveBrandForMessage(message) {
   }
 
   if (senderDomain) {
-    const apex = getApexDomain(senderDomain);
+    const apex = getRegistrableDomain(senderDomain);
     const byDomain = await Brand.findOne({
       $or: [
         { domain: { $regex: new RegExp(`^${escapeRegex(senderDomain)}$`, 'i') } },
-        { domain: { $regex: new RegExp(`^${escapeRegex(apex)}$`, 'i') } }
+        { domain: { $regex: new RegExp(`^${escapeRegex(apex)}$`, 'i') } },
+        { knownSenderDomains: { $regex: new RegExp(`^${escapeRegex(senderDomain)}$`, 'i') } },
+        { knownSenderDomains: { $regex: new RegExp(`^${escapeRegex(apex)}$`, 'i') } }
       ]
     });
     if (byDomain) return byDomain;

@@ -62,6 +62,16 @@ flowchart TD
 
 This means cowork/manual signups are automatically regularized into the same downstream workflow once inbound email evidence appears.
 
+## Sender Identity Robustness
+
+- Brand identity no longer depends only on exact sender email.
+- Matching now uses a domain network approach:
+  - exact sender email
+  - known sender domains
+  - registrable/root domain (example: `viori.com` and `e.viori.com` are treated as the same network)
+  - fallback using meaningful link domains inside the email body
+- Newsletter sender local-part changes (`support@`, `help@`, `no-reply@`) are handled without breaking brand continuity.
+
 ## Email Type Definitions
 
 - `confirmation`: Asks user to confirm/verify subscription.

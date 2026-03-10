@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { normalizeDomain, getRegistrableDomain } = require('../utils/domainIdentity');
 
 // --- Sender Email History (track address changes over time) ---
 const SenderEmailHistorySchema = new mongoose.Schema({
@@ -44,7 +45,10 @@ const BrandSchema = new mongoose.Schema({
   subscriptionEmail:   { type: String, default: 'victor.fire1980@gmail.com' },
   currentSenderEmail:  String,   // The FROM address brand uses to send newsletters
   primarySenderEmail:  String,
+  currentSenderDomain: String,
+  primarySenderDomain: String,
   knownSenderEmails:   [{ type: String, lowercase: true, trim: true }],
+  knownSenderDomains:  [{ type: String, lowercase: true, trim: true }],
   welcomeSenderEmails: [{ type: String, lowercase: true, trim: true }],
   senderEmailHistory:  [SenderEmailHistorySchema],
   signupFormUrl:       String,   // Exact URL where form was located
@@ -196,7 +200,11 @@ BrandSchema.methods.updateStatus = function(newStatus, note = '') {
 BrandSchema.methods.recordSenderChange = function(newEmail) {
   if (!newEmail) return this.save();
   const normalizedEmail = newEmail.toLowerCase().trim();
+  const domainPart = normalizedEmail.includes('@') ? normalizeDomain(normalizedEmail.split('@').pop()) : '';
+  const registrable = getRegistrableDomain(domainPart);
   const oldEmail = this.currentSenderEmail;
+  const oldDomainPart = oldEmail && oldEmail.includes('@') ? normalizeDomain(oldEmail.split('@').pop()) : '';
+  const oldRegistrable = getRegistrableDomain(oldDomainPart);
   if (oldEmail && oldEmail !== normalizedEmail) {
     // Archive the old email
     const existing = this.senderEmailHistory.find(h => h.email === oldEmail);
@@ -205,7 +213,10 @@ BrandSchema.methods.recordSenderChange = function(newEmail) {
     } else {
       this.senderEmailHistory.push({ email: oldEmail, reason: 'change_detected' });
     }
-    this.senderChangedAt = new Date();
+    // Treat local-part and subdomain rotations inside same domain network as non-critical changes.
+    if (!oldRegistrable || !registrable || oldRegistrable !== registrable) {
+      this.senderChangedAt = new Date();
+    }
   }
   // Set the new email, also track it
   this.currentSenderEmail = normalizedEmail;
@@ -213,6 +224,15 @@ BrandSchema.methods.recordSenderChange = function(newEmail) {
   const known = new Set((this.knownSenderEmails || []).map((email) => String(email).toLowerCase()));
   known.add(normalizedEmail);
   this.knownSenderEmails = Array.from(known);
+
+  if (domainPart) {
+    this.currentSenderDomain = domainPart;
+    this.primarySenderDomain = this.primarySenderDomain || domainPart;
+  }
+  const domainSet = new Set((this.knownSenderDomains || []).map((domain) => String(domain).toLowerCase()));
+  if (domainPart) domainSet.add(domainPart);
+  if (registrable) domainSet.add(registrable);
+  this.knownSenderDomains = Array.from(domainSet);
 
   const newEntry = this.senderEmailHistory.find(h => h.email === normalizedEmail);
   if (!newEntry) {

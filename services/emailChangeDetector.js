@@ -6,6 +6,7 @@
 const Brand = require('../models/Brand');
 const { searchMessages, getMessage, parseMessage, extractSenderEmail, extractDomainFromEmail } = require('../config/gmail');
 const { classifyEmailType } = require('./emailConfirmation');
+const { normalizeDomain, getRegistrableDomain, domainsRelated } = require('../utils/domainIdentity');
 const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -23,7 +24,7 @@ async function processIncomingEmail(messageId) {
   const result  = { brand: null, emailType: 'unknown', senderChanged: false };
 
   const senderEmail  = extractSenderEmail(parsed.from);
-  const senderDomain = extractDomainFromEmail(senderEmail);
+  const senderDomain = normalizeDomain(extractDomainFromEmail(senderEmail));
 
   if (!senderEmail || !senderDomain) return result;
 
@@ -40,7 +41,20 @@ async function processIncomingEmail(messageId) {
 
   if (!brand) {
     // Try matching by domain
-    brand = await Brand.findByDomain(senderDomain);
+    brand = await Brand.findByDomain(getRegistrableDomain(senderDomain));
+  }
+
+  if (!brand && senderDomain) {
+    brand = await Brand.findOne({
+      knownSenderDomains: { $regex: new RegExp(`^${senderDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    });
+  }
+
+  if (!brand && senderDomain) {
+    const root = getRegistrableDomain(senderDomain);
+    brand = await Brand.findOne({
+      knownSenderDomains: { $regex: new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    });
   }
 
   if (!brand) {
@@ -55,9 +69,13 @@ async function processIncomingEmail(messageId) {
   // -- Detect sender email change -------------------------------
   if (brand.currentSenderEmail &&
       brand.currentSenderEmail.toLowerCase() !== senderEmail.toLowerCase()) {
+    const currentDomain = normalizeDomain(extractDomainFromEmail(brand.currentSenderEmail));
     logger.info(` Sender change detected for ${brand.name}:`);
     logger.info(`   Old: ${brand.currentSenderEmail}`);
     logger.info(`   New: ${senderEmail}`);
+    if (domainsRelated(currentDomain, senderDomain)) {
+      logger.info('   Domain network unchanged (local part/subdomain rotation)');
+    }
 
     await brand.recordSenderChange(senderEmail);
     result.senderChanged = true;
@@ -71,6 +89,14 @@ async function processIncomingEmail(messageId) {
   brand.totalEmailsReceived = (brand.totalEmailsReceived || 0) + 1;
   brand.lastHealthCheckAt   = new Date();
   brand.isStale             = false;
+  if (senderDomain) {
+    const senderDomainSet = new Set((brand.knownSenderDomains || []).map((domain) => String(domain).toLowerCase()));
+    senderDomainSet.add(senderDomain);
+    senderDomainSet.add(getRegistrableDomain(senderDomain));
+    brand.knownSenderDomains = Array.from(senderDomainSet).filter(Boolean);
+    brand.currentSenderDomain = brand.currentSenderDomain || senderDomain;
+    brand.primarySenderDomain = brand.primarySenderDomain || senderDomain;
+  }
 
   if (emailType === 'welcome' && !brand.welcomeEmailReceived) {
     brand.welcomeEmailReceived   = true;

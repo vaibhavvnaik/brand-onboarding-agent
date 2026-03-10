@@ -8,26 +8,41 @@ const {
   extractDomainFromEmail
 } = require('../config/gmail');
 const { classifyEmailType } = require('./emailConfirmation');
+const {
+  normalizeDomain,
+  getRegistrableDomain,
+  domainsRelated,
+  extractDomainFromUrl
+} = require('../utils/domainIdentity');
 const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function normalizeDomain(domain) {
-  return (domain || '').replace(/^www\./i, '').toLowerCase().trim();
-}
 
 function escapeRegex(input) {
   return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function getApexDomain(domain) {
-  const normalized = normalizeDomain(domain);
-  const parts = normalized.split('.').filter(Boolean);
-  if (parts.length < 2) return normalized;
-  return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+function extractMeaningfulLinkDomains(links = []) {
+  const ignored = new Set([
+    'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'linkedin.com',
+    'youtube.com', 'tiktok.com', 'pinterest.com',
+    'shopify.com', 'myshopify.com', 'shopifycdn.com',
+    'mailchimp.com', 'klaviyomail.com', 'sendgrid.net', 'mandrillapp.com',
+    'google.com', 'googleusercontent.com', 'doubleclick.net'
+  ]);
+  const domains = new Set();
+  for (const link of links || []) {
+    const d = extractDomainFromUrl(link);
+    if (!d) continue;
+    const reg = getRegistrableDomain(d);
+    if (!reg || ignored.has(reg)) continue;
+    domains.add(d);
+    domains.add(reg);
+  }
+  return Array.from(domains);
 }
 
-async function resolveBrand(senderEmail, senderDomain) {
+async function resolveBrand(senderEmail, senderDomain, links = []) {
   if (!senderEmail && !senderDomain) return null;
 
   if (senderEmail) {
@@ -54,7 +69,7 @@ async function resolveBrand(senderEmail, senderDomain) {
 
   if (senderDomain) {
     const cleanDomain = normalizeDomain(senderDomain);
-    const apex = getApexDomain(cleanDomain);
+    const apex = getRegistrableDomain(cleanDomain);
     const byExactDomain = await Brand.findOne({
       domain: { $regex: new RegExp(`^${escapeRegex(cleanDomain)}$`, 'i') }
     });
@@ -64,6 +79,31 @@ async function resolveBrand(senderEmail, senderDomain) {
       domain: { $regex: new RegExp(`^${escapeRegex(apex)}$`, 'i') }
     });
     if (byApexDomain) return byApexDomain;
+
+    const byKnownSenderDomain = await Brand.findOne({
+      knownSenderDomains: { $regex: new RegExp(`^${escapeRegex(cleanDomain)}$`, 'i') }
+    });
+    if (byKnownSenderDomain) return byKnownSenderDomain;
+
+    const byKnownSenderApex = await Brand.findOne({
+      knownSenderDomains: { $regex: new RegExp(`^${escapeRegex(apex)}$`, 'i') }
+    });
+    if (byKnownSenderApex) return byKnownSenderApex;
+  }
+
+  const linkDomains = extractMeaningfulLinkDomains(links);
+  if (linkDomains.length) {
+    const roots = Array.from(new Set(linkDomains.map((domain) => getRegistrableDomain(domain)).filter(Boolean)));
+    if (roots.length) {
+      const byLinkRoots = await Brand.find({ domain: { $in: roots } }).limit(3);
+      if (byLinkRoots.length === 1) return byLinkRoots[0];
+
+      if (byLinkRoots.length > 1 && senderDomain) {
+        const senderRoot = getRegistrableDomain(senderDomain);
+        const related = byLinkRoots.find((brand) => domainsRelated(senderRoot, brand.domain));
+        if (related) return related;
+      }
+    }
   }
 
   return null;
@@ -123,7 +163,7 @@ async function processSingleMessage(messageId) {
   const { emailMessage, senderEmail, senderDomain, emailType } = await upsertEmailMessage(parsed);
   emailMessage.state = 'typed';
 
-  const brand = await resolveBrand(senderEmail, senderDomain);
+  const brand = await resolveBrand(senderEmail, senderDomain, parsed.links || []);
   if (!brand) {
     emailMessage.state = 'brand_unresolved';
     emailMessage.needsReview = true;
@@ -157,6 +197,13 @@ async function processSingleMessage(messageId) {
       senderEmail &&
       (!brand.currentSenderEmail || brand.currentSenderEmail.toLowerCase() !== senderEmail.toLowerCase())) {
     await brand.recordSenderChange(senderEmail);
+  } else if (senderDomain) {
+    const senderDomainSet = new Set((brand.knownSenderDomains || []).map((domain) => String(domain).toLowerCase()));
+    senderDomainSet.add(senderDomain.toLowerCase());
+    senderDomainSet.add(getRegistrableDomain(senderDomain));
+    brand.knownSenderDomains = Array.from(senderDomainSet).filter(Boolean);
+    brand.currentSenderDomain = brand.currentSenderDomain || senderDomain.toLowerCase();
+    brand.primarySenderDomain = brand.primarySenderDomain || senderDomain.toLowerCase();
   }
 
   brand.lastHealthCheckAt = new Date();
