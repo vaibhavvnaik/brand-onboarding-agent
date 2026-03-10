@@ -6,7 +6,7 @@
  */
 const express = require('express');
 const router  = express.Router();
-const { getOAuth2Client, saveRefreshToken, getRefreshToken } = require('../config/gmail');
+const { getOAuth2Client, saveRefreshToken, getRefreshToken, getOAuthCredentials } = require('../config/gmail');
 
 const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -56,7 +56,14 @@ router.get('/', async (req, res) => {
 
 // -- GET /setup/gmail -------------------------------------------
 router.get('/gmail', (req, res) => {
-  const oauth2Client = getOAuth2Client();
+  let oauth2Client;
+  let redirectUri = 'urn:ietf:wg:oauth:2.0:oob';
+  try {
+    ({ redirectUri } = getOAuthCredentials());
+    oauth2Client = getOAuth2Client();
+  } catch (err) {
+    return res.status(500).send(`<p>Error: ${err.message}. Configure Railway env and retry. <a href="/setup">Go back</a></p>`);
+  }
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: GMAIL_SCOPES,
@@ -83,6 +90,7 @@ router.get('/gmail', (req, res) => {
          Open Google Authorization ->
       </a>
       <p class="text-xs text-gray-500">Sign in as <strong>victor.fire1980@gmail.com</strong> and click Allow.</p>
+      <p class="text-xs text-gray-500 mt-2">OAuth redirect in use: <code>${redirectUri}</code></p>
     </div>
 
     <div class="bg-gray-900 rounded-xl p-6 border border-gray-700">
@@ -147,7 +155,16 @@ router.post('/gmail/exchange', async (req, res) => {
   } catch (err) {
     console.error('[EXCHANGE] Error:', err.message, err.stack);
     if (!res.headersSent) {
-      res.status(500).send(`<p>Error: ${err.message || 'Unknown error'}. <a href="/setup/gmail">Go back</a></p>`);
+      const msg = String(err?.message || 'Unknown error');
+      if (msg.includes('invalid_client')) {
+        return res.status(500).send(
+          `<p>Error: invalid_client (Google rejected OAuth client).</p>
+<p>Fix in Railway env: set correct <code>GMAIL_CLIENT_ID</code> and <code>GMAIL_CLIENT_SECRET</code> from the same Google OAuth client.</p>
+<p>Also ensure redirect URI matches: <code>${process.env.GMAIL_REDIRECT_URI || 'urn:ietf:wg:oauth:2.0:oob'}</code>.</p>
+<p><a href="/setup/gmail">Go back</a></p>`
+        );
+      }
+      res.status(500).send(`<p>Error: ${msg}. <a href="/setup/gmail">Go back</a></p>`);
     }
   }
 });

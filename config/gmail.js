@@ -6,16 +6,43 @@ const logger = require('../utils/logger');
 
 let _gmailClient = null;
 
-async function getRefreshToken() {
-  if (process.env.GMAIL_REFRESH_TOKEN && process.env.GMAIL_REFRESH_TOKEN !== 'FILL_IN_AFTER_RUNNING_SETUP') {
-    return process.env.GMAIL_REFRESH_TOKEN;
+function getOAuthCredentials() {
+  const clientId = String(process.env.GMAIL_CLIENT_ID || '').trim();
+  const clientSecret = String(process.env.GMAIL_CLIENT_SECRET || '').trim();
+  const redirectUri = String(process.env.GMAIL_REDIRECT_URI || 'urn:ietf:wg:oauth:2.0:oob').trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error('Missing Gmail OAuth credentials. Set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET.');
   }
+  return { clientId, clientSecret, redirectUri };
+}
+
+async function getRefreshTokenFromDb() {
   try {
     const Config = require('../models/Config');
     const token = await Config.get('gmail_refresh_token');
-    if (token) return token;
-  } catch (_) {}
+    return token || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getRefreshTokenFromEnv() {
+  if (process.env.GMAIL_REFRESH_TOKEN && process.env.GMAIL_REFRESH_TOKEN !== 'FILL_IN_AFTER_RUNNING_SETUP') {
+    return process.env.GMAIL_REFRESH_TOKEN;
+  }
   return null;
+}
+
+async function getRefreshToken() {
+  return getRefreshTokenFromEnv() || await getRefreshTokenFromDb();
+}
+
+function getAuthErrorDetail(err) {
+  const payload = err?.response?.data || err?.errors?.[0] || null;
+  const error = payload?.error || err?.code || 'unknown';
+  const description = payload?.error_description || err?.message || 'unknown auth error';
+  return `${error}: ${description}`;
 }
 
 async function saveRefreshToken(token) {
@@ -34,10 +61,11 @@ async function saveRefreshToken(token) {
 }
 
 function getOAuth2Client(refreshToken) {
+  const { clientId, clientSecret, redirectUri } = getOAuthCredentials();
   const client = new google.auth.OAuth2(
-    process.env.GMAIL_CLIENT_ID,
-    process.env.GMAIL_CLIENT_SECRET,
-    'urn:ietf:wg:oauth:2.0:oob'
+    clientId,
+    clientSecret,
+    redirectUri
   );
   if (refreshToken) client.setCredentials({ refresh_token: refreshToken });
   return client;
@@ -45,19 +73,34 @@ function getOAuth2Client(refreshToken) {
 
 async function getGmailClient() {
   if (_gmailClient) return _gmailClient;
-  const refreshToken = await getRefreshToken();
-  if (!refreshToken) throw new Error('No Gmail token configured. Visit /setup/gmail to connect Gmail.');
-  const auth  = getOAuth2Client(refreshToken);
-  _gmailClient = google.gmail({ version: 'v1', auth });
-  try {
-    await _gmailClient.users.getProfile({ userId: 'me' });
-    logger.info(`[OK] Gmail API connected for ${process.env.GMAIL_USER}`);
-  } catch (err) {
-    _gmailClient = null;
-    logger.error('[ERR] Gmail API authentication failed:', err.message);
-    throw err;
+  const envToken = getRefreshTokenFromEnv();
+  const dbToken = await getRefreshTokenFromDb();
+  const candidates = [
+    { source: 'env', token: envToken },
+    { source: 'db', token: dbToken }
+  ].filter((row) => row.token);
+
+  if (!candidates.length) throw new Error('No Gmail token configured. Visit /setup/gmail to connect Gmail.');
+
+  let lastErr = null;
+  for (const candidate of candidates) {
+    try {
+      const auth = getOAuth2Client(candidate.token);
+      const gmail = google.gmail({ version: 'v1', auth });
+      await gmail.users.getProfile({ userId: 'me' });
+      _gmailClient = gmail;
+      logger.info(`[OK] Gmail API connected for ${process.env.GMAIL_USER} (token_source=${candidate.source})`);
+      if (candidate.source === 'db' && process.env.GMAIL_REFRESH_TOKEN && process.env.GMAIL_REFRESH_TOKEN !== candidate.token) {
+        logger.warn('[gmail] Env refresh token appears stale; DB token succeeded. Update/remove GMAIL_REFRESH_TOKEN env var.');
+      }
+      return _gmailClient;
+    } catch (err) {
+      lastErr = err;
+      logger.error(`[ERR] Gmail API auth failed (token_source=${candidate.source}): ${getAuthErrorDetail(err)}`);
+    }
   }
-  return _gmailClient;
+  _gmailClient = null;
+  throw lastErr || new Error('Gmail authentication failed');
 }
 
 async function searchMessages(query, maxResults = 20) {
@@ -114,4 +157,15 @@ function extractDomainFromEmail(email) {
   return parts.length === 2 ? parts[1].toLowerCase() : null;
 }
 
-module.exports = { getGmailClient, getOAuth2Client, getRefreshToken, saveRefreshToken, searchMessages, getMessage, parseMessage, extractSenderEmail, extractDomainFromEmail };
+module.exports = {
+  getGmailClient,
+  getOAuth2Client,
+  getRefreshToken,
+  saveRefreshToken,
+  searchMessages,
+  getMessage,
+  parseMessage,
+  extractSenderEmail,
+  extractDomainFromEmail,
+  getOAuthCredentials
+};
