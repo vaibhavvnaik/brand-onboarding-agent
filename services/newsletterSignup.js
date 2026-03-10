@@ -611,46 +611,55 @@ async function tryContextualForm(page, websiteUrl, profile, brandName) {
 
 // -- Form Filling Helpers --------------------------------------
 async function findEmailInput(page, options = {}) {
-  const inputs = await page.$$(FORM_SELECTORS.join(','));
-  if (!inputs.length) return null;
-
   let best = null;
   let bestScore = -100;
+  const contexts = [page, ...page.frames()];
 
-  for (const input of inputs) {
+  for (const context of contexts) {
+    const isFrame = context !== page;
+    let inputs = [];
     try {
-      if (!(await input.isVisible())) continue;
-      const score = await input.evaluate((el, opts) => {
-        const hints = ['newsletter', 'subscribe', 'sign up', 'join', 'updates', 'stay in touch', 'email address'];
-        const negativeHints = ['search', 'contact us', 'support', 'order', 'checkout'];
-        const attrBlob = [
-          el.getAttribute('name') || '',
-          el.getAttribute('id') || '',
-          el.getAttribute('class') || '',
-          el.getAttribute('placeholder') || '',
-          el.getAttribute('aria-label') || ''
-        ].join(' ').toLowerCase();
-
-        const container = el.closest('form, footer, section, aside, div');
-        const containerText = (container?.textContent || '').toLowerCase().slice(0, 1800);
-        const inFooter = !!el.closest('footer');
-        let scoreValue = 0;
-
-        if (attrBlob.includes('email')) scoreValue += 3;
-        if (hints.some((h) => containerText.includes(h) || attrBlob.includes(h))) scoreValue += 5;
-        if (negativeHints.some((h) => containerText.includes(h) && !containerText.includes('newsletter'))) scoreValue -= 5;
-        if (containerText.includes('privacy policy') || containerText.includes('unsubscribe')) scoreValue += 2;
-        if (opts.preferFooter && inFooter) scoreValue += 3;
-        if (opts.requireNewsletterContext && !hints.some((h) => containerText.includes(h) || attrBlob.includes(h))) scoreValue -= 8;
-        return scoreValue;
-      }, options);
-
-      if (score > bestScore) {
-        best = input;
-        bestScore = score;
-      }
+      inputs = await context.$$(FORM_SELECTORS.join(','));
     } catch {
       continue;
+    }
+
+    for (const input of inputs) {
+      try {
+        if (!(await input.isVisible())) continue;
+        const score = await input.evaluate((el, opts) => {
+          const hints = ['newsletter', 'subscribe', 'sign up', 'join', 'updates', 'stay in touch', 'email address', 'grow your mind'];
+          const negativeHints = ['search', 'contact us', 'support', 'order', 'checkout'];
+          const attrBlob = [
+            el.getAttribute('name') || '',
+            el.getAttribute('id') || '',
+            el.getAttribute('class') || '',
+            el.getAttribute('placeholder') || '',
+            el.getAttribute('aria-label') || ''
+          ].join(' ').toLowerCase();
+
+          const container = el.closest('form, footer, section, aside, div');
+          const containerText = (container?.textContent || '').toLowerCase().slice(0, 2500);
+          const inFooter = !!el.closest('footer');
+          let scoreValue = 0;
+
+          if (attrBlob.includes('email')) scoreValue += 3;
+          if (hints.some((h) => containerText.includes(h) || attrBlob.includes(h))) scoreValue += 5;
+          if (negativeHints.some((h) => containerText.includes(h) && !containerText.includes('newsletter'))) scoreValue -= 5;
+          if (containerText.includes('privacy policy') || containerText.includes('unsubscribe')) scoreValue += 2;
+          if (opts.preferFooter && inFooter) scoreValue += 3;
+          if (opts.requireNewsletterContext && !hints.some((h) => containerText.includes(h) || attrBlob.includes(h))) scoreValue -= 8;
+          return scoreValue;
+        }, options);
+
+        const adjustedScore = isFrame ? score + 2 : score;
+        if (adjustedScore > bestScore) {
+          best = input;
+          bestScore = adjustedScore;
+        }
+      } catch {
+        continue;
+      }
     }
   }
 

@@ -7,7 +7,8 @@ let runtimeState = {
   checkedAt: null,
   ready: false,
   reason: 'not_checked',
-  autoInstallAttempted: false
+  autoInstallAttempted: false,
+  autoInstallDepsAttempted: false
 };
 
 let checkingPromise = null;
@@ -18,8 +19,15 @@ function withLibraryPaths() {
     path.join(__dirname, '../.local-libs/lib/x86_64-linux-gnu')
   ].map((p) => path.resolve(p)).filter((p) => fs.existsSync(p));
 
+  const systemPaths = [
+    '/usr/lib/x86_64-linux-gnu',
+    '/lib/x86_64-linux-gnu',
+    '/usr/lib64',
+    '/lib64'
+  ].filter((p) => fs.existsSync(p));
+
   const existing = process.env.LD_LIBRARY_PATH ? process.env.LD_LIBRARY_PATH.split(':') : [];
-  process.env.LD_LIBRARY_PATH = Array.from(new Set([...libPaths, ...existing.filter(Boolean)])).join(':');
+  process.env.LD_LIBRARY_PATH = Array.from(new Set([...libPaths, ...systemPaths, ...existing.filter(Boolean)])).join(':');
   if (!process.env.PLAYWRIGHT_BROWSERS_PATH) process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 }
 
@@ -41,6 +49,30 @@ function tryInstallChromium() {
     stdio: 'inherit',
     env: process.env
   });
+}
+
+function tryInstallChromiumWithDeps() {
+  runtimeState.autoInstallDepsAttempted = true;
+  const installCmd = `${process.execPath} ./node_modules/playwright/cli.js install --with-deps chromium`;
+  logger.warn(`[runtime] Missing Playwright shared libs detected; attempting deps install: ${installCmd}`);
+  execSync(installCmd, {
+    cwd: path.resolve(__dirname, '..'),
+    stdio: 'inherit',
+    env: process.env
+  });
+}
+
+function isSharedLibError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return (
+    msg.includes('error while loading shared libraries') ||
+    msg.includes('libglib') ||
+    msg.includes('libnspr') ||
+    msg.includes('libnss3') ||
+    msg.includes('libx11') ||
+    msg.includes('libgbm') ||
+    msg.includes('libdrm')
+  );
 }
 
 async function launchSmokeTest() {
@@ -84,6 +116,21 @@ async function ensurePlaywrightRuntimeReady({ autoInstall = true } = {}) {
         runtimeState.reason = 'ok';
         logger.info('[runtime] Playwright preflight passed (launch smoke test succeeded).');
       } catch (err) {
+        if (autoInstall && isSharedLibError(err)) {
+          try {
+            tryInstallChromiumWithDeps();
+            await launchSmokeTest();
+            runtimeState.ready = true;
+            runtimeState.reason = 'ok';
+            logger.info('[runtime] Playwright preflight recovered after dependency install.');
+            return runtimeState;
+          } catch (retryErr) {
+            runtimeState.ready = false;
+            runtimeState.reason = retryErr.message;
+            logger.error(`[runtime] Playwright preflight failed after deps install retry: ${retryErr.message}`);
+            return runtimeState;
+          }
+        }
         runtimeState.ready = false;
         runtimeState.reason = err.message;
         logger.error(`[runtime] Playwright preflight failed: ${err.message}`);
