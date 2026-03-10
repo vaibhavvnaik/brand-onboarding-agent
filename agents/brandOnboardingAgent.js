@@ -9,6 +9,7 @@ const { categorizeBrand } = require('../services/brandCategorizer');
 const { filterDuplicates } = require('../services/duplicateChecker');
 const { scanRecentEmails, detectStaleBrands } = require('../services/emailChangeDetector');
 const { classifySignupFailure } = require('../utils/signupFailure');
+const { ensurePlaywrightRuntimeReady } = require('../utils/runtimePreflight');
 const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -61,6 +62,14 @@ async function runFullOnboarding(batchSize, emit, getStopFlag) {
   }
   emit('success', 'categorization', `[OK] Categorized ${stats.categorized} brands`);
   emit('info', 'signup', ` Phase 3: Signing up for ${toOnboard.length} newsletters...`);
+
+  const runtime = await ensurePlaywrightRuntimeReady({ autoInstall: true });
+  if (!runtime.ready) {
+    emit('error', 'signup', `[ERR] Runtime preflight failed before signup phase: ${runtime.reason || 'unknown reason'}`);
+    emit('warn', 'signup', 'Skipping signup phase for this run to avoid bulk environment failures.');
+    return stats;
+  }
+
   for (let i = 0; i < toOnboard.length; i++) {
     if (getStopFlag()) { emit('warn', 'stop', ' Stopped by user'); break; }
     const brand   = toOnboard[i];

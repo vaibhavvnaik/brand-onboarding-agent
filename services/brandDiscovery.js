@@ -20,6 +20,12 @@ const BASE_HEADERS = {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let anthropicClient = null;
 
+function envFlag(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
+
 function getAnthropicClient() {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -222,6 +228,7 @@ const SEED_BRANDS = [
  */
 async function scrapeMilledSearch(searchTerm, maxResults = 30) {
   const brands = [];
+  let blockedBy403 = false;
   try {
     const url = `https://milled.com/search?q=${encodeURIComponent(searchTerm)}&type=senders`;
     logger.info(`Scraping milled.com: "${searchTerm}"`);
@@ -280,9 +287,10 @@ async function scrapeMilledSearch(searchTerm, maxResults = 30) {
 
     logger.info(`Found ${brands.length} brands for "${searchTerm}"`);
   } catch (err) {
+    if (Number(err?.response?.status) === 403) blockedBy403 = true;
     logger.warn(`Milled.com scrape failed for "${searchTerm}": ${err.message}`);
   }
-  return brands;
+  return { brands, blockedBy403 };
 }
 
 /**
@@ -384,6 +392,9 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   const discovered = new Map(); // domain -> brand object, to deduplicate
   const discoverySource = String(process.env.DISCOVERY_SOURCE || 'claude').toLowerCase();
   const strictClaude = String(process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
+  const enableMilled = envFlag('DISCOVERY_ENABLE_MILLED', false);
+  const milledMaxQueries = Math.max(1, parseInt(process.env.DISCOVERY_MILLED_MAX_QUERIES || '15', 10));
+  const milledStopOn403 = envFlag('DISCOVERY_MILLED_STOP_ON_403', true);
   const hasClaudeKey = !!process.env.ANTHROPIC_API_KEY;
   const useClaude = discoverySource !== 'legacy';
   const allowFallback = discoverySource !== 'claude_only' || !strictClaude;
@@ -428,56 +439,68 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   }
   logger.info(`Loaded ${discovered.size} seed brands`);
 
-  // -- 2. Scrape milled.com by category -------------------------
-  // Sort by priority - do high-priority categories first
-  const sortedTerms = [...MILLED_SEARCH_TERMS].sort((a, b) => a.priority - b.priority);
+  // -- 2. Optionally scrape milled.com by category --------------
+  // Disabled by default because Milled often returns 403 from cloud hosts.
+  if (enableMilled) {
+    const sortedTerms = [...MILLED_SEARCH_TERMS].sort((a, b) => a.priority - b.priority).slice(0, milledMaxQueries);
+    let milledBlocked = false;
 
-  for (const { category, query, priority } of sortedTerms) {
-    if (discovered.size >= limit * 3) break; // We have enough to filter from
+    for (const { category, query } of sortedTerms) {
+      if (discovered.size >= limit * 3) break;
+      if (milledBlocked) break;
 
-    try {
-      const milledBrands = await scrapeMilledSearch(query, 20);
-      await sleep(1500); // Be polite to milled.com
-
-      for (const brand of milledBrands) {
-        if (!brand.name) continue;
-
-        // If we got a milled slug, try to get the actual domain
-        let domain = brand.domain;
-        if (!domain && brand.milledSlug) {
-          const detail = await scrapeMilledBrandPage(brand.milledSlug);
-          await sleep(800);
-          if (detail.domain) {
-            domain = detail.domain;
-            Object.assign(brand, detail);
-          }
+      try {
+        const { brands: milledBrands, blockedBy403 } = await scrapeMilledSearch(query, 20);
+        if (blockedBy403 && milledStopOn403) {
+          milledBlocked = true;
+          logger.warn('[discovery] Stopping Milled scraping for this run after HTTP 403 block.');
+          continue;
         }
 
-        if (!domain) domain = brand.milledSlug + '.com'; // Best guess
+        await sleep(1500); // Be polite to milled.com
 
-        const cleanDomain = domain.replace(/^www\./, '').toLowerCase();
-        if (existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+        for (const brand of milledBrands) {
+          if (!brand.name) continue;
 
-        // Basic quality filter
-        const qualityScore = scoreBrand({ ...brand, category });
-        if (qualityScore < 4) continue;
+          // If we got a milled slug, try to get the actual domain
+          let domain = brand.domain;
+          if (!domain && brand.milledSlug) {
+            const detail = await scrapeMilledBrandPage(brand.milledSlug);
+            await sleep(800);
+            if (detail.domain) {
+              domain = detail.domain;
+              Object.assign(brand, detail);
+            }
+          }
 
-        discovered.set(cleanDomain, {
-          name:         brand.name,
-          domain:       cleanDomain,
-          websiteUrl:   brand.websiteUrl || `https://www.${cleanDomain}`,
-          description:  brand.description || '',
-          source:       'milled.com',
-          sourceUrl:    brand.sourceUrl,
-          milledFrequency:     brand.milledFrequency,
-          milledIndustrialTags: brand.milledIndustrialTags || [],
-          qualityScore,
-          affiliatePotentialScore: qualityScore >= 7 ? 7 : qualityScore >= 5 ? 5 : 4
-        });
+          if (!domain) domain = brand.milledSlug + '.com'; // Best guess
+
+          const cleanDomain = domain.replace(/^www\./, '').toLowerCase();
+          if (existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+
+          // Basic quality filter
+          const qualityScore = scoreBrand({ ...brand, category });
+          if (qualityScore < 4) continue;
+
+          discovered.set(cleanDomain, {
+            name:         brand.name,
+            domain:       cleanDomain,
+            websiteUrl:   brand.websiteUrl || `https://www.${cleanDomain}`,
+            description:  brand.description || '',
+            source:       'milled.com',
+            sourceUrl:    brand.sourceUrl,
+            milledFrequency:     brand.milledFrequency,
+            milledIndustrialTags: brand.milledIndustrialTags || [],
+            qualityScore,
+            affiliatePotentialScore: qualityScore >= 7 ? 7 : qualityScore >= 5 ? 5 : 4
+          });
+        }
+      } catch (err) {
+        logger.warn(`Category scrape failed for ${category}: ${err.message}`);
       }
-    } catch (err) {
-      logger.warn(`Category scrape failed for ${category}: ${err.message}`);
     }
+  } else {
+    logger.info('[discovery] Milled scraping disabled (set DISCOVERY_ENABLE_MILLED=true to enable).');
   }
 
   // -- 3. Sort by quality score and return top N -----------------
