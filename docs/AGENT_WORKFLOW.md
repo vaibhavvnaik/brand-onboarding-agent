@@ -125,7 +125,10 @@ This means cowork/manual signups are automatically regularized into the same dow
 
 - On onboarding, if a brand has no `logoUrl`, agent attempts non-LLM logo discovery from website HTML:
   - `og:logo`, `og:image`, `twitter:image`, icon links, logo-like image elements, JSON-LD logo.
-- Candidate logo is downloaded and stored in `artifacts/logos/` and saved to `brand.logoUrl` as `/artifacts/logos/...`.
+- Storage options:
+  - `LOGO_STORAGE_PROVIDER=github` (recommended for persistence): uploads logo file to a GitHub repo path and stores CDN/public URL in `brand.logoUrl`.
+  - `LOGO_STORAGE_PROVIDER=local`: stores file in `artifacts/logos/` (not durable across redeploys).
+- For production permanence, use GitHub storage config env vars (`GITHUB_LOGO_OWNER`, `GITHUB_LOGO_REPO`, `GITHUB_LOGO_BRANCH`, `GITHUB_LOGO_PATH_PREFIX`, `GITHUB_LOGO_TOKEN`).
 - Bulk backfill endpoint:
   - `POST /api/brands/logo-backfill` with optional body `{ "limit": 100, "force": false }`
 

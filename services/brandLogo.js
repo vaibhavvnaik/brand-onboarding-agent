@@ -6,9 +6,14 @@ const cheerio = require('cheerio');
 const logger = require('../utils/logger');
 
 const LOGO_DIR = path.join(__dirname, '../artifacts/logos');
+const GITHUB_API = 'https://api.github.com';
 
 function ensureLogoDir() {
   if (!fs.existsSync(LOGO_DIR)) fs.mkdirSync(LOGO_DIR, { recursive: true });
+}
+
+function getLogoStorageProvider() {
+  return String(process.env.LOGO_STORAGE_PROVIDER || 'local').toLowerCase();
 }
 
 function normalizeDomain(domain = '') {
@@ -144,8 +149,7 @@ async function fetchHtml(url) {
   return { url: res.request?.res?.responseUrl || url, html: String(res.data || '') };
 }
 
-async function downloadLogo(url, domain) {
-  ensureLogoDir();
+async function fetchLogoBytes(url, domain) {
   const res = await axios.get(url, {
     responseType: 'arraybuffer',
     timeout: 12000,
@@ -172,10 +176,70 @@ async function downloadLogo(url, domain) {
     throw new Error(`Not an image payload: ${contentType}`);
   }
   const ext = extByType || extByUrl || 'png';
-  const fileName = `${normalizeDomain(domain)}-${hash(url)}.${ext}`;
+  return { buffer, contentType, ext };
+}
+
+async function saveLogoLocal({ buffer, domain, sourceUrl, ext }) {
+  ensureLogoDir();
+  const fileName = `${normalizeDomain(domain)}-${hash(sourceUrl)}.${ext}`;
   const filePath = path.join(LOGO_DIR, fileName);
   fs.writeFileSync(filePath, buffer);
-  return { logoUrl: `/artifacts/logos/${fileName}`, filePath, contentType };
+  return { logoUrl: `/artifacts/logos/${fileName}`, filePath, provider: 'local' };
+}
+
+function githubConfig() {
+  return {
+    token: process.env.GITHUB_LOGO_TOKEN || process.env.GITHUB_TOKEN || '',
+    owner: process.env.GITHUB_LOGO_OWNER || '',
+    repo: process.env.GITHUB_LOGO_REPO || '',
+    branch: process.env.GITHUB_LOGO_BRANCH || 'main',
+    pathPrefix: String(process.env.GITHUB_LOGO_PATH_PREFIX || 'brand-logos').replace(/^\/+|\/+$/g, ''),
+    publicBaseUrl: (process.env.GITHUB_LOGO_PUBLIC_BASE_URL || '').replace(/\/+$/, '')
+  };
+}
+
+async function saveLogoGitHub({ buffer, domain, sourceUrl, ext }) {
+  const cfg = githubConfig();
+  if (!cfg.token || !cfg.owner || !cfg.repo) {
+    throw new Error('Missing GitHub logo storage configuration');
+  }
+
+  const fileName = `${normalizeDomain(domain)}-${hash(sourceUrl)}.${ext}`;
+  const filePath = `${cfg.pathPrefix}/${fileName}`;
+  const url = `${GITHUB_API}/repos/${cfg.owner}/${cfg.repo}/contents/${encodeURIComponent(filePath)}`;
+  const headers = {
+    Authorization: `Bearer ${cfg.token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+
+  let sha = null;
+  try {
+    const existing = await axios.get(`${url}?ref=${encodeURIComponent(cfg.branch)}`, { headers, timeout: 12000 });
+    sha = existing?.data?.sha || null;
+  } catch (err) {
+    if (Number(err?.response?.status) !== 404) throw err;
+  }
+
+  await axios.put(url, {
+    message: `chore(logos): upsert ${fileName}`,
+    content: buffer.toString('base64'),
+    branch: cfg.branch,
+    ...(sha ? { sha } : {})
+  }, { headers, timeout: 15000 });
+
+  const logoUrl = cfg.publicBaseUrl
+    ? `${cfg.publicBaseUrl}/${filePath}`
+    : `https://cdn.jsdelivr.net/gh/${cfg.owner}/${cfg.repo}@${cfg.branch}/${filePath}`;
+  return { logoUrl, filePath, provider: 'github' };
+}
+
+async function persistLogo({ buffer, domain, sourceUrl, ext }) {
+  const provider = getLogoStorageProvider();
+  if (provider === 'github') {
+    return saveLogoGitHub({ buffer, domain, sourceUrl, ext });
+  }
+  return saveLogoLocal({ buffer, domain, sourceUrl, ext });
 }
 
 async function discoverLogoCandidate(websiteUrl, domain) {
@@ -203,8 +267,14 @@ async function ensureBrandLogo({ websiteUrl, domain, name, currentLogoUrl } = {}
 
     for (const candidate of candidates.slice(0, 8)) {
       try {
-        const saved = await downloadLogo(candidate.url, cleanDomain);
-        return { ok: true, logoUrl: saved.logoUrl, sourceUrl: candidate.url, source: candidate.source };
+        const payload = await fetchLogoBytes(candidate.url, cleanDomain);
+        const saved = await persistLogo({
+          buffer: payload.buffer,
+          domain: cleanDomain,
+          sourceUrl: candidate.url,
+          ext: payload.ext
+        });
+        return { ok: true, logoUrl: saved.logoUrl, sourceUrl: candidate.url, source: candidate.source, storage: saved.provider };
       } catch {
         continue;
       }
