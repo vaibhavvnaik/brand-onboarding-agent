@@ -81,7 +81,7 @@ function buildCoworkPrompt(row) {
   ].filter(Boolean).join('\n');
 }
 
-function buildWorkflowStepStates(brand) {
+function buildWorkflowStepStates(brand, { hasIngestedMessage = false } = {}) {
   const status = String(brand.onboardingStatus || '');
   const failed = status === 'failed' || status === 'captcha_blocked';
   const active = status === 'active';
@@ -103,7 +103,7 @@ function buildWorkflowStepStates(brand) {
     welcomeEmail: donePendingFailed(!!brand.welcomeEmailReceived, status === 'awaiting_confirmation' || status === 'submitted' || status === 'subscribing'),
     confirmation: donePendingFailed(confirmationSeen, !!brand.confirmationRequired && !confirmationSeen),
     newsletterSeen: donePendingFailed(newsletterSeen, status === 'awaiting_confirmation' || status === 'confirmed'),
-    ingestion: donePendingFailed(Number(brand.totalEmailsReceived || 0) > 0, newsletterSeen),
+    ingestion: donePendingFailed(hasIngestedMessage, newsletterSeen),
     active: active ? 'done' : (failed ? 'failed' : 'todo')
   };
 }
@@ -514,6 +514,29 @@ router.get('/brands/workflow-matrix', async (req, res) => {
       .select('name domain websiteUrl onboardingStatus discoveredAt createdAt updatedAt signupAttempts lastSignupAttempt signupError signupFailureCode signupFailureCategory welcomeEmailReceived confirmationRequired signupConfirmedAt firstNewsletterAt totalEmailsReceived')
       .lean();
 
+    const brandIds = brands.map((brand) => brand._id);
+    const ingestedByBrandRows = brandIds.length
+      ? await EmailMessage.aggregate([
+        {
+          $match: {
+            brandId: { $in: brandIds },
+            emailType: { $in: ['newsletter', 'welcome'] },
+            $or: [
+              { ingestedAt: { $exists: true, $ne: null } },
+              { state: { $in: ['ingested', 'finalized'] } },
+              { 'processedBy.fnl_reader.done': true }
+            ]
+          }
+        },
+        { $group: { _id: '$brandId', count: { $sum: 1 } } }
+      ])
+      : [];
+    const ingestedByBrand = new Set(
+      ingestedByBrandRows
+        .filter((row) => row?._id)
+        .map((row) => String(row._id))
+    );
+
     const rows = brands.map((brand) => ({
       brandId: String(brand._id),
       name: brand.name || '',
@@ -521,7 +544,9 @@ router.get('/brands/workflow-matrix', async (req, res) => {
       websiteUrl: brand.websiteUrl || '',
       onboardingStatus: brand.onboardingStatus || 'discovered',
       updatedAt: brand.updatedAt || brand.createdAt || null,
-      steps: buildWorkflowStepStates(brand)
+      steps: buildWorkflowStepStates(brand, {
+        hasIngestedMessage: ingestedByBrand.has(String(brand._id))
+      })
     }));
 
     res.json({
