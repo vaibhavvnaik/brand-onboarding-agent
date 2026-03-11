@@ -102,26 +102,43 @@ async function screenshotEmailMessage(message) {
       if (body) body.style.margin = '0';
       if (doc) doc.style.margin = '0';
 
+      const centerX = vw / 2;
+      const maxWidth = Math.max(320, vw * 0.98);
+      const preferredWidth = 600;
+
       const candidates = Array.from(document.querySelectorAll('table,main,article,section,div'))
-        .map((el) => el.getBoundingClientRect())
-        .filter((r) => {
-          const widthOk = r.width >= 280 && r.width <= Math.max(320, vw * 0.98);
-          const heightOk = r.height >= 600;
-          const visibleOk = r.bottom > 0 && r.right > 0;
-          return widthOk && heightOk && visibleOk;
-        });
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          const area = r.width * r.height;
+          if (!(r.width >= 300 && r.width <= maxWidth)) return null;
+          if (r.height < 500) return null;
+          if (!(r.bottom > 0 && r.right > 0)) return null;
+          if (area < 220000) return null;
+
+          const widthScore = 1 - Math.min(1, Math.abs(r.width - preferredWidth) / 450);
+          const centerScore = 1 - Math.min(1, Math.abs((r.left + r.width / 2) - centerX) / (vw / 2));
+          const topScore = 1 - Math.min(1, Math.max(0, r.top) / 900);
+          const areaScore = Math.min(1, area / 1200000);
+          const tallPenalty = r.width > (vw * 0.9) ? 0.35 : 0;
+          const score = (widthScore * 0.45) + (centerScore * 0.3) + (topScore * 0.15) + (areaScore * 0.1) - tallPenalty;
+
+          return { r, score };
+        })
+        .filter(Boolean);
 
       if (!candidates.length) return null;
 
-      // Prefer the largest tall block that likely represents email body content.
-      candidates.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-      const best = candidates[0];
-      if (!best) return null;
+      candidates.sort((a, b) => b.score - a.score);
+      const best = candidates[0]?.r;
+      if (!best || best.width < 280 || best.height < 400) return null;
 
-      const x = Math.max(0, Math.floor(best.left));
-      const y = Math.max(0, Math.floor(best.top));
-      const width = Math.max(320, Math.floor(best.width));
-      const height = Math.max(800, Math.floor(best.height));
+      const padX = 6;
+      const padY = 4;
+      const x = Math.max(0, Math.floor(best.left + padX));
+      const y = Math.max(0, Math.floor(Math.max(0, best.top + padY)));
+      const width = Math.max(320, Math.floor(Math.min(vw - x, best.width - (padX * 2))));
+      const height = Math.max(700, Math.floor(best.height - (padY * 2)));
+
       return { x, y, width, height };
     }, viewportWidth);
 
