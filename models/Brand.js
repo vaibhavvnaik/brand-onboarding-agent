@@ -66,7 +66,10 @@ const BrandSchema = new mongoose.Schema({
   tagline:      String,
 
   // -- Subscription ---------------------------------------------
-  subscriptionEmail:   { type: String, default: 'victor.fire1980@gmail.com' },
+  subscriptionEmail:   {
+    type: String,
+    default: () => process.env.GMAIL_USER || 'newsletter@example.com'
+  },
   currentSenderEmail:  String,   // The FROM address brand uses to send newsletters
   primarySenderEmail:  String,
   currentSenderDomain: String,

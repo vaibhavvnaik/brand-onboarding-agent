@@ -16,7 +16,7 @@ const logger = require('../utils/logger');
 const axios = require('axios');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const EMAIL = process.env.GMAIL_USER || 'victor.fire1980@gmail.com';
+const EMAIL = process.env.GMAIL_USER || 'newsletter@example.com';
 
 // Hard cap per brand: 3 minutes
 const SIGNUP_TIMEOUT_MS = 3 * 60 * 1000;

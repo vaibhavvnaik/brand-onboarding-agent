@@ -75,7 +75,7 @@ function generateProfile() {
     firstName,
     lastName,
     fullName:    `${firstName} ${lastName}`,
-    email:       process.env.GMAIL_USER || 'victor.fire1980@gmail.com',
+    email:       process.env.GMAIL_USER || 'newsletter@example.com',
 
     // Date of birth variants
     birthday:    `${birthMonth}/${birthDay}/${birthYear}`,

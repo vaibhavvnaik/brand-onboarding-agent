@@ -89,7 +89,7 @@ router.get('/gmail', (req, res) => {
          class="block w-full text-center bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 px-4 rounded-lg transition mb-3">
          Open Google Authorization ->
       </a>
-      <p class="text-xs text-gray-500">Sign in as <strong>victor.fire1980@gmail.com</strong> and click Allow.</p>
+      <p class="text-xs text-gray-500">Sign in as <strong>${process.env.GMAIL_USER || 'your-newsletter-inbox@example.com'}</strong> and click Allow.</p>
       <p class="text-xs text-gray-500 mt-2">OAuth redirect in use: <code>${redirectUri}</code></p>
     </div>
 
