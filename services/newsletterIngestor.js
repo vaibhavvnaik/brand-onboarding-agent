@@ -143,15 +143,20 @@ async function screenshotEmailMessage(message) {
     }, viewportWidth);
 
     if (clip) {
-      await page.screenshot({
-        path: filePath,
-        clip: {
-          x: clip.x,
-          y: clip.y,
-          width: clip.width,
-          height: clip.height
-        }
-      });
+      try {
+        await page.screenshot({
+          path: filePath,
+          clip: {
+            x: clip.x,
+            y: clip.y,
+            width: clip.width,
+            height: clip.height
+          }
+        });
+      } catch (err) {
+        // Some templates produce invalid clip bounds after dynamic layout; fallback safely.
+        await page.screenshot({ path: filePath, fullPage: true });
+      }
     } else {
       await page.screenshot({ path: filePath, fullPage: true });
     }
@@ -447,11 +452,12 @@ async function materializeListingForMessage({ message, brand, withScreenshots = 
 }
 
 async function markMessageIngestResult({ message, success, error = null, version = 'v2' }) {
-  message.processedBy.fnl_reader = {
+  message.processedBy = message.processedBy || {};
+  message.processedBy.ingestion_runner = {
     done: success,
     at: new Date(),
     version,
-    attempts: (message.processedBy?.fnl_reader?.attempts || 0) + 1,
+    attempts: (message.processedBy?.ingestion_runner?.attempts || 0) + 1,
     status: success ? 'done' : 'error',
     lastProcessedAt: new Date(),
     error
@@ -488,7 +494,12 @@ async function markMessageIngestResult({ message, success, error = null, version
 async function ingestPendingNewsletters({ limit = 50 } = {}) {
   const candidates = await EmailMessage.find({
     emailType: { $in: ['newsletter', 'welcome'] },
-    'processedBy.fnl_reader.done': { $ne: true }
+    $or: [
+      { ingestedAt: { $exists: false } },
+      { ingestedAt: null }
+    ],
+    state: { $nin: ['ingested', 'finalized'] },
+    'processedBy.ingestion_runner.done': { $ne: true }
   }).sort({ receivedAt: -1 }).limit(limit);
 
   const stats = {
@@ -499,12 +510,13 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
   };
 
   for (const message of candidates) {
+    message.processedBy = message.processedBy || {};
     if (!message.brandId) {
-      message.processedBy.fnl_reader = {
+      message.processedBy.ingestion_runner = {
         done: false,
         at: new Date(),
         version: 'v2',
-        attempts: (message.processedBy?.fnl_reader?.attempts || 0) + 1,
+        attempts: (message.processedBy?.ingestion_runner?.attempts || 0) + 1,
         status: 'skipped',
         lastProcessedAt: new Date(),
         error: 'Missing brandId'
@@ -517,11 +529,11 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
 
     const brand = await Brand.findById(message.brandId);
     if (!brand) {
-      message.processedBy.fnl_reader = {
+      message.processedBy.ingestion_runner = {
         done: false,
         at: new Date(),
         version: 'v2',
-        attempts: (message.processedBy?.fnl_reader?.attempts || 0) + 1,
+        attempts: (message.processedBy?.ingestion_runner?.attempts || 0) + 1,
         status: 'error',
         lastProcessedAt: new Date(),
         error: 'Brand not found'
