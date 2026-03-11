@@ -84,15 +84,60 @@ async function screenshotEmailMessage(message) {
     : `<html><body><pre style="white-space:pre-wrap;font-family:Arial,sans-serif;">${message.bodyText || message.textBody || message.snippet || ''}</pre></body></html>`;
 
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
+  const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 820);
+  const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 2000);
   const browser = await chromium.launch({
     headless: true,
     executablePath,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 1800 } });
+    const page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.screenshot({ path: filePath, fullPage: true });
+
+    // Try to crop to the main email content column so previews are visually larger.
+    const clip = await page.evaluate((vw) => {
+      const doc = document.documentElement;
+      const body = document.body;
+      if (body) body.style.margin = '0';
+      if (doc) doc.style.margin = '0';
+
+      const candidates = Array.from(document.querySelectorAll('table,main,article,section,div'))
+        .map((el) => el.getBoundingClientRect())
+        .filter((r) => {
+          const widthOk = r.width >= 280 && r.width <= Math.max(320, vw * 0.98);
+          const heightOk = r.height >= 600;
+          const visibleOk = r.bottom > 0 && r.right > 0;
+          return widthOk && heightOk && visibleOk;
+        });
+
+      if (!candidates.length) return null;
+
+      // Prefer the largest tall block that likely represents email body content.
+      candidates.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+      const best = candidates[0];
+      if (!best) return null;
+
+      const x = Math.max(0, Math.floor(best.left));
+      const y = Math.max(0, Math.floor(best.top));
+      const width = Math.max(320, Math.floor(best.width));
+      const height = Math.max(800, Math.floor(best.height));
+      return { x, y, width, height };
+    }, viewportWidth);
+
+    if (clip) {
+      await page.screenshot({
+        path: filePath,
+        clip: {
+          x: clip.x,
+          y: clip.y,
+          width: clip.width,
+          height: clip.height
+        }
+      });
+    } else {
+      await page.screenshot({ path: filePath, fullPage: true });
+    }
     return filePath;
   } finally {
     await browser.close().catch(() => {});
