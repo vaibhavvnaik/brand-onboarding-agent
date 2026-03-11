@@ -534,15 +534,18 @@ async function backfillListingsFromEmailMessages({
       );
 
       if (missingScreenshotOnly) {
-        const hasMessageScreenshot = /^https?:\/\//i.test(String(message.screenshotPath || ''));
         const hasListingScreenshot = /^https?:\/\//i.test(String(existing?.content || ''));
-        if (hasMessageScreenshot || hasListingScreenshot) {
+        // In missing-screenshot mode, only skip when Listing already has a screenshot URL.
+        // If message has screenshotPath URL but Listing.content is empty, we should still
+        // materialize to copy that URL onto the listing row.
+        if (hasListingScreenshot) {
           stats.skippedHasScreenshot += 1;
           continue;
         }
       }
 
-      if (existing && !forceUpdate) {
+      const allowUpdatingExistingForMissingScreenshot = missingScreenshotOnly && existing;
+      if (existing && !forceUpdate && !allowUpdatingExistingForMissingScreenshot) {
         stats.alreadyPresent += 1;
         continue;
       }
