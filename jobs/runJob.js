@@ -5,6 +5,7 @@ const { run } = require('../agents/brandOnboardingAgent');
 const { processInbox, processInboxFullHistory } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
 const { ingestPendingNewsletters, backfillListingsFromEmailMessages } = require('../services/newsletterIngestor');
+const { runLinkLegacyListingsToEmails } = require('./linkLegacyListingsToEmails');
 
 async function runJob(job, options = {}) {
   switch (job) {
@@ -41,6 +42,14 @@ async function runJob(job, options = {}) {
         forceUpdate: String(options.forceUpdate ?? process.env.BACKFILL_FORCE_UPDATE ?? 'false') === 'true',
         missingScreenshotOnly: String(options.missingScreenshotOnly ?? process.env.BACKFILL_MISSING_SCREENSHOT_ONLY ?? 'false') === 'true'
       });
+    case 'link_legacy_listings_to_emails':
+      return runLinkLegacyListingsToEmails({
+        limit: Number(options.limit || process.env.LINK_LEGACY_LIMIT || 500),
+        autoThreshold: Number(options.autoThreshold || process.env.LINK_LEGACY_AUTO_THRESHOLD || 0.95),
+        minAmbiguousThreshold: Number(options.minAmbiguousThreshold || process.env.LINK_LEGACY_AMBIGUOUS_THRESHOLD || 0.6),
+        ambiguousGap: Number(options.ambiguousGap || process.env.LINK_LEGACY_AMBIGUOUS_GAP || 0.15),
+        dryRun: String(options.dryRun ?? process.env.LINK_LEGACY_DRY_RUN ?? 'false') === 'true'
+      });
     default:
       throw new Error(`Unknown job: ${job}`);
   }
@@ -49,7 +58,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings|link_legacy_listings_to_emails>');
     process.exit(1);
   }
 
