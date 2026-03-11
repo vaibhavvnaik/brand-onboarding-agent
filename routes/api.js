@@ -15,7 +15,7 @@ const { ensureBrandLogo } = require('../services/brandLogo');
 const { scanRecentEmails } = require('../services/emailChangeDetector');
 const { processInbox } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
-const { ingestPendingNewsletters } = require('../services/newsletterIngestor');
+const { ingestPendingNewsletters, backfillListingsFromEmailMessages } = require('../services/newsletterIngestor');
 const { runJob } = require('../jobs/runJob');
 const logger = require('../utils/logger');
 const ActivityLog = require('../models/ActivityLog');
@@ -931,6 +931,19 @@ router.delete('/brands/:id', async (req, res) => {
     if (!brand) return res.status(404).json({ error: 'Brand not found' });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Backfill screenshots endpoint
+router.post('/agent/backfill-screenshots', async (req, res) => {
+  try {
+    const { limit = 500, withScreenshots = true, forceUpdate = true, forceScreenshotRetake = true } = req.body || {};
+    res.json({ message: 'Backfill started', options: { limit, withScreenshots, forceUpdate, forceScreenshotRetake } });
+    backfillListingsFromEmailMessages({ limit, withScreenshots, forceUpdate, forceScreenshotRetake }).catch(err => {
+      console.error('[backfill-screenshots] error:', err.message);
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
