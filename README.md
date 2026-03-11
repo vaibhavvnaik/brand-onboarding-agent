@@ -72,7 +72,7 @@ npm run job:cycle
 ```
 
 Migration orchestration details:
-- See [docs/FNL_READER_MIGRATION_RUNBOOK.md](docs/FNL_READER_MIGRATION_RUNBOOK.md)
+- See [docs/FNL_READER_MIGRATION_RUNBOOK.md](docs/FNL_READER_MIGRATION_RUNBOOK.md) for historical migration context
 - `job:migrate` runs full-history scan + confirmation + ingestion + optional backfill in one sequence.
 
 Full-history scan controls (env):

@@ -46,7 +46,7 @@ async function runMigration() {
   await connectDB();
 
   try {
-    console.log('[migration] Starting fnl_reader -> brand-onboarding-agent migration run');
+    console.log('[migration] Starting brand-onboarding-agent migration run');
     console.log('[migration] Config:', JSON.stringify(cfg, null, 2));
 
     const scanResult = await runJob('scan_inbox_full_history', {

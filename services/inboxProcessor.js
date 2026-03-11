@@ -594,7 +594,7 @@ async function upsertEmailMessage(parsed) {
         processedBy: {
           identity_resolver: { done: false, status: 'pending', attempts: 0, version: 'v1' },
           confirmation_runner: { done: false, status: 'pending', attempts: 0, version: 'v1' },
-          fnl_reader: { done: false, status: 'pending', attempts: 0, version: 'v1' }
+          ingestion_runner: { done: false, status: 'pending', attempts: 0, version: 'v1' }
         }
       }
     },
@@ -817,9 +817,15 @@ async function processMessageRefs(refs, stats, logPrefix) {
     loopCount += 1;
     try {
       const existing = await EmailMessage.findOne({ gmailMessageId: ref.id })
-        .select('processedBy state')
+        .select('processedBy state ingestedAt')
         .lean();
-      if (existing?.processedBy?.fnl_reader?.done && existing?.processedBy?.confirmation_runner?.done) {
+      if (
+        existing?.processedBy?.confirmation_runner?.done &&
+        (
+          !!existing?.ingestedAt ||
+          ['ingested', 'finalized'].includes(String(existing?.state || ''))
+        )
+      ) {
         stats.skippedAlreadyFinalized += 1;
         continue;
       }

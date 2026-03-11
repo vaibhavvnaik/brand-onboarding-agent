@@ -524,7 +524,7 @@ router.get('/brands/workflow-matrix', async (req, res) => {
             $or: [
               { ingestedAt: { $exists: true, $ne: null } },
               { state: { $in: ['ingested', 'finalized'] } },
-              { 'processedBy.fnl_reader.done': true }
+              { 'processedBy.ingestion_runner.done': true }
             ]
           }
         },

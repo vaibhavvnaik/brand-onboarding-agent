@@ -98,7 +98,7 @@ const EmailMessageSchema = new mongoose.Schema({
   processedBy: {
     identity_resolver: { type: ProcessorStateSchema, default: () => ({}) },
     confirmation_runner: { type: ProcessorStateSchema, default: () => ({}) },
-    fnl_reader: { type: ProcessorStateSchema, default: () => ({}) }
+    ingestion_runner: { type: ProcessorStateSchema, default: () => ({}) }
   }
 }, {
   timestamps: true,
@@ -111,8 +111,8 @@ EmailMessageSchema.index({ rfc822MessageId: 1 });
 EmailMessageSchema.index({ senderApexDomain: 1, receivedAt: -1 });
 EmailMessageSchema.index({ 'processedBy.identity_resolver.status': 1 });
 EmailMessageSchema.index({ 'processedBy.confirmation_runner.status': 1 });
-EmailMessageSchema.index({ 'processedBy.fnl_reader.status': 1 });
-EmailMessageSchema.index({ 'processedBy.fnl_reader.done': 1 });
+EmailMessageSchema.index({ 'processedBy.ingestion_runner.status': 1 });
+EmailMessageSchema.index({ 'processedBy.ingestion_runner.done': 1 });
 EmailMessageSchema.index({ 'processedBy.confirmation_runner.done': 1 });
 
 module.exports = mongoose.model('EmailMessage', EmailMessageSchema);
