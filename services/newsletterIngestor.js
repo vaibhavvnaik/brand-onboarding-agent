@@ -83,7 +83,12 @@ async function screenshotEmailMessage(message) {
     ? message.bodyHtml
     : `<html><body><pre style="white-space:pre-wrap;font-family:Arial,sans-serif;">${message.bodyText || message.textBody || message.snippet || ''}</pre></body></html>`;
 
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath,
+    args: ['--no-sandbox', '--disable-dev-shm-usage']
+  });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 1800 } });
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 20000 });
@@ -498,7 +503,8 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
 async function backfillListingsFromEmailMessages({
   limit = 500,
   withScreenshots = false,
-  forceUpdate = false
+  forceUpdate = false,
+  missingScreenshotOnly = false
 } = {}) {
   const db = mongoose.connection.db;
   const listingCol = db.collection('Listing');
@@ -512,14 +518,30 @@ async function backfillListingsFromEmailMessages({
   const stats = {
     scanned: candidates.length,
     backfilled: 0,
+    screenshotUploaded: 0,
+    screenshotMissing: 0,
     alreadyPresent: 0,
+    skippedHasScreenshot: 0,
     skippedNoBrand: 0,
     failed: 0
   };
 
   for (const message of candidates) {
     try {
-      const existing = await listingCol.findOne({ messageId: message.gmailMessageId }, { projection: { _id: 1 } });
+      const existing = await listingCol.findOne(
+        { messageId: message.gmailMessageId },
+        { projection: { _id: 1, content: 1 } }
+      );
+
+      if (missingScreenshotOnly) {
+        const hasMessageScreenshot = /^https?:\/\//i.test(String(message.screenshotPath || ''));
+        const hasListingScreenshot = /^https?:\/\//i.test(String(existing?.content || ''));
+        if (hasMessageScreenshot || hasListingScreenshot) {
+          stats.skippedHasScreenshot += 1;
+          continue;
+        }
+      }
+
       if (existing && !forceUpdate) {
         stats.alreadyPresent += 1;
         continue;
@@ -537,6 +559,8 @@ async function backfillListingsFromEmailMessages({
         withScreenshots,
         context: 'backfill_listings'
       });
+      if (materialized?.screenshotUrl) stats.screenshotUploaded += 1;
+      else if (withScreenshots) stats.screenshotMissing += 1;
       message.screenshotPath = materialized.screenshotUrl || message.screenshotPath || null;
       await markMessageIngestResult({ message, success: true, version: 'v2' });
       await message.save();
