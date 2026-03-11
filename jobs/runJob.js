@@ -40,7 +40,8 @@ async function runJob(job, options = {}) {
         limit: Number(options.limit || process.env.BACKFILL_LIMIT || 500),
         withScreenshots: String(options.withScreenshots ?? process.env.BACKFILL_WITH_SCREENSHOTS ?? 'false') === 'true',
         forceUpdate: String(options.forceUpdate ?? process.env.BACKFILL_FORCE_UPDATE ?? 'false') === 'true',
-        missingScreenshotOnly: String(options.missingScreenshotOnly ?? process.env.BACKFILL_MISSING_SCREENSHOT_ONLY ?? 'false') === 'true'
+        missingScreenshotOnly: String(options.missingScreenshotOnly ?? process.env.BACKFILL_MISSING_SCREENSHOT_ONLY ?? 'false') === 'true',
+        forceScreenshotRetake: String(options.forceScreenshotRetake ?? 'false') === 'true'
       });
     case 'link_legacy_listings_to_emails':
       return runLinkLegacyListingsToEmails({
