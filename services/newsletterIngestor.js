@@ -84,8 +84,8 @@ async function screenshotEmailMessage(message) {
     : `<html><body><pre style="white-space:pre-wrap;font-family:Arial,sans-serif;">${message.bodyText || message.textBody || message.snippet || ''}</pre></body></html>`;
 
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
-  const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 820);
-  const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 2000);
+  const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 600);
+  const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 1200);
   const browser = await chromium.launch({
     headless: true,
     executablePath,
