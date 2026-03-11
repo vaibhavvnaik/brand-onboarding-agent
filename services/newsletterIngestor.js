@@ -413,14 +413,16 @@ async function upsertUrkListing({ message, agentBrand, screenshotUrl }) {
   );
 }
 
-async function materializeListingForMessage({ message, brand, withScreenshots = true, context = 'ingest_newsletters' }) {
+async function materializeListingForMessage({ message, brand, withScreenshots = true, forceScreenshotRetake = false, context = 'ingest_newsletters' }) {
   let screenshotPath = null;
   let screenshotUrl = null;
 
-  // Reuse existing URL if already uploaded.
-  const existingPath = String(message.screenshotPath || '');
-  if (/^https?:\/\//i.test(existingPath)) {
-    screenshotUrl = existingPath;
+  // Reuse existing URL if already uploaded (unless force retake requested).
+  if (!forceScreenshotRetake) {
+    const existingPath = String(message.screenshotPath || '');
+    if (/^https?:\/\//i.test(existingPath)) {
+      screenshotUrl = existingPath;
+    }
   }
 
   // Safety: never persist ephemeral local file paths into Listing.content.
@@ -578,7 +580,8 @@ async function backfillListingsFromEmailMessages({
   limit = 500,
   withScreenshots = false,
   forceUpdate = false,
-  missingScreenshotOnly = false
+  missingScreenshotOnly = false,
+  forceScreenshotRetake = false
 } = {}) {
   const db = mongoose.connection.db;
   const listingCol = db.collection('Listing');
@@ -634,6 +637,7 @@ async function backfillListingsFromEmailMessages({
         message,
         brand,
         withScreenshots,
+        forceScreenshotRetake,
         context: 'backfill_listings'
       });
       if (materialized?.screenshotUrl) stats.screenshotUploaded += 1;
