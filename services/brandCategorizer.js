@@ -1,20 +1,10 @@
 /**
  * Brand Categorizer Service
- * Uses Claude AI to intelligently categorize brands and score them for
+ * Uses local/cloud-hosted Ollama-compatible LLM to categorize brands and score them for
  * quality, affiliate potential, and audience fit.
  */
-const Anthropic = require('@anthropic-ai/sdk');
 const logger = require('../utils/logger');
-
-let anthropicClient = null;
-
-function getClient() {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!anthropicClient) {
-    anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  }
-  return anthropicClient;
-}
+const { createChatCompletion, isLlmAvailable } = require('./llmClient');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -94,13 +84,11 @@ function normalizeCategorizationPayload(brand, data = {}) {
  * @returns {Object} categorization result
  */
 async function categorizeBrand(brand) {
-  const client = getClient();
-  if (!client) {
-    return { success: false, data: getDefaultCategorization(brand), error: 'ANTHROPIC_API_KEY not configured' };
+  if (!isLlmAvailable()) {
+    return { success: false, data: getDefaultCategorization(brand), error: 'LLM not configured (set OLLAMA_BASE_URL/OLLAMA_MODEL)' };
   }
 
-  const prompt = `Classify this D2C brand and return compact JSON only (no markdown, no prose).
-Output only required fields used by pipeline.
+  const prompt = `Classify this D2C brand. Return JSON only.
 
 Brand:
 name=${brand.name}
@@ -109,48 +97,27 @@ website=${brand.websiteUrl || 'N/A'}
 description=${brand.description || 'N/A'}
 tags=${(brand.milledIndustrialTags || []).join(', ') || 'none'}
 
-Allowed primaryCategory:
-Fashion & Apparel|Beauty & Skincare|Health & Wellness|Home & Living|Food & Beverage|Fitness & Sports|Outdoor & Adventure|Tech & Gadgets|Sustainable & Eco|Baby & Kids|Pets|Travel & Luggage|Jewelry & Watches|Personal Care & Grooming|Gifts & Novelty|Office & Stationery|Art & Craft|Other
+primaryCategory must be one of:
+Fashion & Apparel, Beauty & Skincare, Health & Wellness, Home & Living, Food & Beverage, Fitness & Sports, Outdoor & Adventure, Tech & Gadgets, Sustainable & Eco, Baby & Kids, Pets, Travel & Luggage, Jewelry & Watches, Personal Care & Grooming, Gifts & Novelty, Office & Stationery, Art & Craft, Other
 
-Return exactly:
+Return this minimal JSON shape:
 {
   "primaryCategory":"",
-  "categories":[],
-  "productTypes":[],
-  "tags":[],
-  "lifestyleTags":[],
-  "targetDemographic":[],
-  "genderFocus":"women|men|unisex|kids|all",
-  "priceRange":"budget|mid-range|premium|luxury|mixed",
   "brandTier":"emerging|established|premium|luxury|niche",
-  "audienceSize":"niche|mid|large|mega",
-  "businessModel":"dtc|retail|marketplace|subscription|hybrid",
-  "affiliateNetworks":[],
-  "hasAffiliateProgram":false,
-  "estimatedRevShare":"unknown",
   "qualityScore":5,
-  "affiliatePotentialScore":5,
-  "description":""
+  "affiliatePotentialScore":5
 }
-
-Constraints:
-- categories: 1-3
-- productTypes: 0-4
-- tags: 3-8
-- lifestyleTags: 0-3
-- targetDemographic: 1-4
-- affiliateNetworks: 0-3
-- description max 12 words`;
+`;
 
   try {
-    const response = await client.messages.create({
-      model:      'claude-haiku-4-5-20251001',
-      max_tokens: 360,
-      messages:   [{ role: 'user', content: prompt }]
+    const response = await createChatCompletion({
+      phase: 'categorize_single',
+      maxTokens: 48,
+      temperature: 0.1,
+      messages: [{ role: 'user', content: prompt }]
     });
-    logger.info(`[llm] phase=categorize_single brand=${brand.name} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
-    const raw = response.content[0].text.trim();
+    const raw = response.text.trim();
     const parsedData = parseJsonFromModel(raw, 'object');
     const data = normalizeCategorizationPayload(brand, parsedData);
 
@@ -177,46 +144,37 @@ Constraints:
  * Saves ~60% tokens vs individual calls by amortizing system prompt overhead.
  */
 async function categorizeBrandBatch(brands) {
-  const client = getClient();
-  if (!client) {
+  if (!isLlmAvailable()) {
     return brands.map((brand) => ({
       success: false,
       data: getDefaultCategorization(brand),
-      error: 'ANTHROPIC_API_KEY not configured'
+      error: 'LLM not configured (set OLLAMA_BASE_URL/OLLAMA_MODEL)'
     }));
   }
   const brandsList = brands.map((brand, i) =>
     `${i + 1}|${brand.name}|${brand.domain}|${brand.websiteUrl || 'N/A'}|${(brand.description || 'N/A').slice(0, 120)}|${(brand.milledIndustrialTags || []).slice(0, 5).join(',') || 'none'}`
   ).join('\n');
 
-  const prompt = `Analyze ${brands.length} D2C brands and return JSON array only. No markdown.
-Be concise.
+  const prompt = `Analyze ${brands.length} D2C brands. Return JSON array only.
 
 Brands format:
 index|name|domain|website|description|tags
 ${brandsList}
 
-Each array item must include:
-index,primaryCategory,categories,productTypes,tags,lifestyleTags,targetDemographic,genderFocus,priceRange,brandTier,audienceSize,businessModel,affiliateNetworks,hasAffiliateProgram,estimatedRevShare,qualityScore,affiliatePotentialScore,description
+Each item should include:
+index,primaryCategory,brandTier,qualityScore,affiliatePotentialScore
 
 Constraints:
-- categories 1-3
-- productTypes 0-4
-- tags 3-8
-- lifestyleTags 0-3
-- targetDemographic 1-4
-- affiliateNetworks 0-3
-- description max 8 words
 - index must match input index`;
 
-  const response = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: Math.min(2200, 260 + brands.length * 230),
+  const response = await createChatCompletion({
+    phase: 'categorize_batch',
+    maxTokens: Math.min(2200, 260 + brands.length * 230),
+    temperature: 0.1,
     messages: [{ role: 'user', content: prompt }]
   });
-  logger.info(`[llm] phase=categorize_batch count=${brands.length} req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
 
-  const raw = response.content[0].text.trim();
+  const raw = response.text.trim();
   const dataArray = parseJsonFromModel(raw, 'array');
 
   if (!Array.isArray(dataArray) || !dataArray.length) {
@@ -250,8 +208,17 @@ async function categorizeBrands(brands) {
   logger.info(`\n  Categorizing ${brands.length} brands with AI...`);
   const results = [];
   const BATCH_SIZE = Math.max(2, Math.min(12, parseInt(process.env.CATEGORIZER_BATCH_SIZE || '6', 10)));
+  const disableBatch = ['1', 'true', 'yes', 'on'].includes(String(process.env.CATEGORIZER_DISABLE_BATCH || 'false').toLowerCase());
 
   async function processBatch(batch, label) {
+    if (disableBatch || batch.length === 1) {
+      const singleResults = [];
+      for (const brand of batch) {
+        const result = await categorizeBrand(brand);
+        singleResults.push({ brand, ...result });
+      }
+      return singleResults;
+    }
     try {
       const batchResults = await categorizeBrandBatch(batch);
       return batch.map((brand, idx) => ({ brand, ...batchResults[idx] }));

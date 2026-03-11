@@ -182,7 +182,7 @@ const BrandSchema = new mongoose.Schema({
   },
 
   // -- Discovery Metadata ----------------------------------------
-  source:       { type: String, enum: ['milled.com', 'web_search', 'manual', 'referral', 'curated_seed', 'claude_ai'] },
+  source:       { type: String, enum: ['milled.com', 'web_search', 'manual', 'referral', 'curated_seed', 'claude_ai', 'ollama_ai', 'ollama_pool'] },
   sourceUrl:    String,
   discoveredAt: { type: Date, default: Date.now },
   milledFrequency: String, // How often they send (from milled.com)

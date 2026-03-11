@@ -47,7 +47,9 @@ Set variables in `.env`:
 Optional:
 
 - `AGENT_API_KEY`
-- `ANTHROPIC_API_KEY` (only for AI categorization fallback)
+- `OLLAMA_BASE_URL` (default: `http://127.0.0.1:11434/v1`)
+- `OLLAMA_MODEL` (default: `qwen2.5:0.5b`)
+- `OLLAMA_API_KEY` (optional; default: `ollama`)
 
 ### 2) Install + checks
 

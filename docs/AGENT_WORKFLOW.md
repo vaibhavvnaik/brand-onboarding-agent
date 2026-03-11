@@ -36,8 +36,8 @@ flowchart TD
 - Discovery targets `batchSize` candidates.
 - After dedupe, the run onboards all unique candidates from that discovered set.
 - There is no extra `*2` expansion and no truncation to first N after dedupe.
-- By default discovery source is `claude` (set via `DISCOVERY_SOURCE`).
-- Claude discovery stores domain history in Mongo key `claude_discovery_domains` to avoid repeats across runs.
+- By default discovery source is `ollama` (set via `DISCOVERY_SOURCE`).
+- LLM discovery stores domain history in Mongo key `llm_discovery_domains` (legacy key `claude_discovery_domains` is still read).
 
 ## Brand Status Definitions
 
@@ -132,18 +132,18 @@ This means cowork/manual signups are automatically regularized into the same dow
 - Bulk backfill endpoint:
   - `POST /api/brands/logo-backfill` with optional body `{ "limit": 100, "force": false }`
 
-## Claude Discovery Runtime Notes
+## LLM Discovery Runtime Notes
 
-- `DISCOVERY_SOURCE=claude` (default): try Claude first, then fallback discovery.
-- `DISCOVERY_SOURCE=claude_only`: Claude only unless `DISCOVERY_STRICT_CLAUDE=true`.
-- `DISCOVERY_STRICT_CLAUDE=false` (default): if Claude/key fails, fallback discovery prevents cycle failure.
-- `ANTHROPIC_API_KEY` must be present for Claude generation.
+- `DISCOVERY_SOURCE=ollama` (default): try Ollama LLM first, then fallback discovery.
+- `DISCOVERY_SOURCE=ollama_only`: LLM only unless `DISCOVERY_STRICT_LLM=true`.
+- `DISCOVERY_STRICT_LLM=false` (default): if LLM call fails, fallback discovery prevents cycle failure.
+- Configure `OLLAMA_BASE_URL` and `OLLAMA_MODEL`.
 
 ## Discovery Pool (1000 Candidate Buffer)
 
 - Discovery now supports a persistent Mongo pool of candidates (`discovery_candidates` collection).
 - On each run, agent consumes next `batchSize` brands from this stored pool first.
-- Claude calls are used to top up pool only when available queue drops below target.
+- LLM calls are used to top up pool only when available queue drops below target.
 - Default controls:
   - `DISCOVERY_POOL_ENABLED=true`
   - `DISCOVERY_POOL_TARGET_SIZE=1000`

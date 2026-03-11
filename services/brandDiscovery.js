@@ -5,10 +5,10 @@
  */
 const axios = require('axios');
 const cheerio = require('cheerio');
-const Anthropic = require('@anthropic-ai/sdk');
 const Config = require('../models/Config');
 const DiscoveryCandidate = require('../models/DiscoveryCandidate');
 const logger = require('../utils/logger');
+const { createChatCompletion, isLlmAvailable } = require('./llmClient');
 
 const BASE_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -19,18 +19,11 @@ const BASE_HEADERS = {
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-let anthropicClient = null;
 
 function envFlag(name, fallback = false) {
   const raw = process.env[name];
   if (raw == null || raw === '') return fallback;
   return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
-}
-
-function getAnthropicClient() {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!anthropicClient) anthropicClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  return anthropicClient;
 }
 
 function normalizeDomain(domain = '') {
@@ -62,8 +55,8 @@ function normalizeBrandCandidate(brand = {}) {
     description: String(brand.description || '').trim(),
     primaryCategory: String(brand.primaryCategory || 'Other').trim(),
     tier: String(brand.tier || brand.brandTier || 'established').toLowerCase(),
-    source: String(brand.source || 'claude_pool'),
-    sourceUrl: String(brand.sourceUrl || 'claude://discovery-pool'),
+    source: String(brand.source || 'ollama_pool'),
+    sourceUrl: String(brand.sourceUrl || 'ollama://discovery-pool'),
     qualityScore: Number(brand.qualityScore || 6),
     affiliatePotentialScore: Number(brand.affiliatePotentialScore || 5)
   };
@@ -130,8 +123,8 @@ async function fetchFromDiscoveryPool(limit, existingDomains = new Set()) {
     domain: row.domain,
     websiteUrl: row.websiteUrl,
     description: row.description,
-    source: row.source || 'claude_pool',
-    sourceUrl: row.sourceUrl || 'claude://discovery-pool',
+    source: row.source || 'ollama_pool',
+    sourceUrl: row.sourceUrl || 'ollama://discovery-pool',
     primaryCategory: row.primaryCategory || 'Other',
     tier: row.tier || 'established',
     qualityScore: row.qualityScore || 6,
@@ -172,7 +165,7 @@ async function fillDiscoveryPool({
     const { available } = await getDiscoveryPoolStats(existingDomains);
     if (available >= safeTarget) break;
     const needed = Math.min(safeChunk, safeTarget - available);
-    const batch = await discoverBrandsWithClaude(needed, generationExclude, {
+    const batch = await discoverBrandsWithLlm(needed, generationExclude, {
       useHistoryFilter: false,
       highQualityOnly
     });
@@ -188,17 +181,21 @@ async function fillDiscoveryPool({
   return { calls, generated, upserted, ...stats, targetSize: safeTarget };
 }
 
-async function discoverBrandsWithClaude(limit, existingDomains = new Set(), options = {}) {
-  const client = getAnthropicClient();
-  if (!client) {
-    logger.warn('[discovery] Claude discovery skipped: ANTHROPIC_API_KEY missing');
+async function discoverBrandsWithLlm(limit, existingDomains = new Set(), options = {}) {
+  if (!isLlmAvailable()) {
+    logger.warn('[discovery] LLM discovery skipped: LLM not configured');
     return [];
   }
 
-  const requestedLimit = Math.max(1, Math.min(12, parseInt(limit || 1, 10)));
+  const hardMaxReturn = Math.max(1, Math.min(12, parseInt(process.env.DISCOVERY_LLM_MAX_RETURN || '4', 10)));
+  const requestedLimit = Math.max(1, Math.min(hardMaxReturn, parseInt(limit || 1, 10)));
   const useHistoryFilter = options.useHistoryFilter !== false;
   const highQualityOnly = options.highQualityOnly !== false;
-  const history = useHistoryFilter ? (await Config.get('claude_discovery_domains').catch(() => []) || []) : [];
+  const history = useHistoryFilter
+    ? (await Config.get('llm_discovery_domains').catch(() => null))
+      || (await Config.get('claude_discovery_domains').catch(() => null))
+      || []
+    : [];
   const blocked = new Set([
     ...Array.from(existingDomains || []).map((d) => normalizeDomain(d)),
     ...history.map((d) => normalizeDomain(d))
@@ -206,8 +203,7 @@ async function discoverBrandsWithClaude(limit, existingDomains = new Set(), opti
 
   const avoidListMax = Math.max(20, parseInt(process.env.DISCOVERY_AVOID_LIST_MAX || '60', 10));
   const avoidList = Array.from(blocked).filter(Boolean).slice(-avoidListMax);
-  const prompt = `Return exactly ${requestedLimit} real D2C ecommerce brands as compact JSON only.
-No markdown. No prose.
+  const prompt = `Return exactly ${requestedLimit} real D2C ecommerce brands as JSON only.
 
 JSON array schema:
 [{"name":"","domain":"","websiteUrl":"","primaryCategory":"","brandTier":"","reason":""}]
@@ -226,14 +222,13 @@ Rules:
 
   let results = [];
   try {
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: Math.max(600, Math.min(1400, 600 + requestedLimit * 50)),
+    const response = await createChatCompletion({
+      phase: 'discovery',
+      maxTokens: Math.max(140, Math.min(320, 120 + requestedLimit * 40)),
+      temperature: 0.2,
       messages: [{ role: 'user', content: prompt }]
     });
-    logger.info(`[llm] phase=discovery req_id=${response?.id || 'unknown'} in=${response?.usage?.input_tokens ?? 'n/a'} out=${response?.usage?.output_tokens ?? 'n/a'} model=claude-haiku-4-5-20251001`);
-
-    const raw = (response.content?.[0]?.text || '').trim();
+    const raw = (response.text || '').trim();
     const jsonBlock = raw.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
     const start = jsonBlock.indexOf('[');
     const end = jsonBlock.lastIndexOf(']');
@@ -258,8 +253,8 @@ Rules:
         domain,
         websiteUrl,
         description: String(item?.reason || '').trim(),
-        source: 'claude_ai',
-        sourceUrl: 'claude://brand-discovery',
+        source: 'ollama_ai',
+        sourceUrl: 'ollama://brand-discovery',
         primaryCategory: String(item?.primaryCategory || 'Other').trim(),
         tier,
         qualityScore: quality,
@@ -268,19 +263,19 @@ Rules:
       if (results.length >= requestedLimit) break;
     }
   } catch (err) {
-    logger.warn(`[discovery] Claude discovery failed: ${err.message}`);
+    logger.warn(`[discovery] LLM discovery failed: ${err.message}`);
     return [];
   }
 
   if (results.length && useHistoryFilter) {
     try {
       const updatedHistory = Array.from(new Set([...history, ...results.map((r) => r.domain)])).slice(-1500);
-      await Config.set('claude_discovery_domains', updatedHistory);
+      await Config.set('llm_discovery_domains', updatedHistory);
     } catch (err) {
-      logger.warn(`[discovery] Claude history persistence failed, continuing with fresh results: ${err.message}`);
+      logger.warn(`[discovery] LLM history persistence failed, continuing with fresh results: ${err.message}`);
     }
   }
-  logger.info(`[discovery] Claude generated ${results.length} candidate brands`);
+  logger.info(`[discovery] LLM generated ${results.length} candidate brands`);
   return results;
 }
 
@@ -538,8 +533,9 @@ function scoreBrand(brand) {
 async function discoverBrands(limit = 20, existingDomains = new Set()) {
   logger.info(`\n Starting brand discovery - target: ${limit} brands`);
   const discovered = new Map(); // domain -> brand object, to deduplicate
-  const discoverySource = String(process.env.DISCOVERY_SOURCE || 'claude').toLowerCase();
-  const strictClaude = String(process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
+  const discoverySourceRaw = String(process.env.DISCOVERY_SOURCE || 'ollama').toLowerCase();
+  const discoverySource = discoverySourceRaw === 'claude' ? 'ollama' : discoverySourceRaw;
+  const strictLlm = String(process.env.DISCOVERY_STRICT_LLM || process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
   const poolEnabled = envFlag('DISCOVERY_POOL_ENABLED', true);
   const poolTargetSize = Math.max(100, parseInt(process.env.DISCOVERY_POOL_TARGET_SIZE || '1000', 10));
   const poolFillChunkSize = Math.max(10, parseInt(process.env.DISCOVERY_POOL_FILL_BATCH || '12', 10));
@@ -551,15 +547,15 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   const enableMilled = envFlag('DISCOVERY_ENABLE_MILLED', false);
   const milledMaxQueries = Math.max(1, parseInt(process.env.DISCOVERY_MILLED_MAX_QUERIES || '15', 10));
   const milledStopOn403 = envFlag('DISCOVERY_MILLED_STOP_ON_403', true);
-  const hasClaudeKey = !!process.env.ANTHROPIC_API_KEY;
-  const useClaude = discoverySource !== 'legacy';
-  const allowFallback = discoverySource !== 'claude_only' || !strictClaude;
+  const llmConfigured = isLlmAvailable();
+  const useLlm = !['legacy', 'milled_only'].includes(discoverySource);
+  const allowFallback = discoverySource !== 'ollama_only' || !strictLlm;
 
-  if (useClaude) {
-    if (!hasClaudeKey) {
-      logger.warn('[discovery] ANTHROPIC_API_KEY missing; using fallback discovery sources');
+  if (useLlm) {
+    if (!llmConfigured) {
+      logger.warn('[discovery] LLM not configured; using fallback discovery sources');
     }
-    if (poolEnabled && hasClaudeKey) {
+    if (poolEnabled && llmConfigured) {
       const initialPoolStats = await getDiscoveryPoolStats(existingDomains);
       const needsExhaustRefill = poolRefillOnExhaust && initialPoolStats.available < limit;
       const belowThreshold = initialPoolStats.available < poolRefillThreshold;
@@ -597,28 +593,28 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
 
     if (discovered.size < limit) {
       const missing = limit - discovered.size;
-      const claudeBrands = await discoverBrandsWithClaude(missing, existingDomains, {
+      const llmBrands = await discoverBrandsWithLlm(missing, existingDomains, {
         useHistoryFilter: true,
         highQualityOnly: poolHighQualityOnly
       });
-      for (const brand of claudeBrands) {
+      for (const brand of llmBrands) {
         const cleanDomain = normalizeDomain(brand.domain);
         if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
         discovered.set(cleanDomain, brand);
       }
-      if (poolEnabled && claudeBrands.length) {
-        await upsertDiscoveryPoolCandidates(claudeBrands);
+      if (poolEnabled && llmBrands.length) {
+        await upsertDiscoveryPoolCandidates(llmBrands);
       }
     }
 
     if (discovered.size >= limit) {
       const result = Array.from(discovered.values()).slice(0, limit);
-      logger.info(`[OK] Discovery complete (Claude/Pool): returning ${result.length} brands`);
+      logger.info(`[OK] Discovery complete (LLM/Pool): returning ${result.length} brands`);
       return result;
     }
     if (!allowFallback) {
       const result = Array.from(discovered.values()).slice(0, limit);
-      logger.info(`[OK] Discovery complete (Claude-only): returning ${result.length} brands`);
+      logger.info(`[OK] Discovery complete (LLM-only): returning ${result.length} brands`);
       return result;
     }
   }

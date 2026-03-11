@@ -149,12 +149,13 @@ function startInternalScheduler() {
 }
 
 function logDiscoveryRuntimeConfig() {
-  const source = String(process.env.DISCOVERY_SOURCE || 'claude').toLowerCase();
-  const strictClaude = String(process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
-  const hasAnthropicKey = !!process.env.ANTHROPIC_API_KEY;
-  logger.info(`[discovery] source=${source} anthropic_key=${hasAnthropicKey ? 'present' : 'missing'} strict_claude=${strictClaude}`);
-  if (!hasAnthropicKey && source !== 'legacy') {
-    logger.warn('[discovery] Claude discovery not available (missing ANTHROPIC_API_KEY). Fallback sources will be used.');
+  const sourceRaw = String(process.env.DISCOVERY_SOURCE || 'ollama').toLowerCase();
+  const source = sourceRaw === 'claude' ? 'ollama' : sourceRaw;
+  const strictLlm = String(process.env.DISCOVERY_STRICT_LLM || process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
+  const hasLlmConfig = !!(process.env.OLLAMA_BASE_URL || process.env.LLM_BASE_URL);
+  logger.info(`[discovery] source=${source} llm_config=${hasLlmConfig ? 'present' : 'missing'} strict_llm=${strictLlm}`);
+  if (!hasLlmConfig && source !== 'legacy' && source !== 'milled_only') {
+    logger.warn('[discovery] LLM discovery not available (missing OLLAMA_BASE_URL/LLM_BASE_URL). Fallback sources will be used.');
   }
 }
 

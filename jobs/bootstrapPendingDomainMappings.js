@@ -172,6 +172,102 @@ const DOMAIN_BOOTSTRAP = [
     brandName: 'Urban Outfitters',
     brandDomain: 'urbanoutfitters.com',
     websiteUrl: 'https://www.urbanoutfitters.com'
+  },
+  {
+    senderDomain: 'e.markandgraham.com',
+    brandName: 'Mark and Graham',
+    brandDomain: 'markandgraham.com',
+    websiteUrl: 'https://www.markandgraham.com'
+  },
+  {
+    senderDomain: 'e.westelm.com',
+    brandName: 'West Elm',
+    brandDomain: 'westelm.com',
+    websiteUrl: 'https://www.westelm.com'
+  },
+  {
+    senderDomain: 'e.potterybarnkids.com',
+    brandName: 'Pottery Barn Kids',
+    brandDomain: 'potterybarnkids.com',
+    websiteUrl: 'https://www.potterybarnkids.com'
+  },
+  {
+    senderDomain: 'e.williams-sonoma.com',
+    brandName: 'Williams Sonoma',
+    brandDomain: 'williams-sonoma.com',
+    websiteUrl: 'https://www.williams-sonoma.com'
+  },
+  {
+    senderDomain: 'email.athleta.com',
+    brandName: 'Athleta',
+    brandDomain: 'athleta.com',
+    websiteUrl: 'https://www.athleta.com'
+  },
+  {
+    senderDomain: 'email.newbalance.com',
+    brandName: 'New Balance',
+    brandDomain: 'newbalance.com',
+    websiteUrl: 'https://www.newbalance.com'
+  },
+  {
+    senderDomain: 'em.target.com',
+    brandName: 'Target',
+    brandDomain: 'target.com',
+    websiteUrl: 'https://www.target.com'
+  },
+  {
+    senderDomain: 'e.pbteen.com',
+    brandName: 'PBteen',
+    brandDomain: 'pbteen.com',
+    websiteUrl: 'https://www.pbteen.com'
+  },
+  {
+    senderDomain: 'e.potterybarn.com',
+    brandName: 'Pottery Barn',
+    brandDomain: 'potterybarn.com',
+    websiteUrl: 'https://www.potterybarn.com'
+  },
+  {
+    senderDomain: 'orders.express.com',
+    brandName: 'Express',
+    brandDomain: 'express.com',
+    websiteUrl: 'https://www.express.com'
+  },
+  {
+    senderDomain: 'atoms.com',
+    brandName: 'Atoms',
+    brandDomain: 'atoms.com',
+    websiteUrl: 'https://www.atoms.com'
+  },
+  {
+    senderDomain: 'e.greenrow.com',
+    brandName: 'GreenRow',
+    brandDomain: 'greenrow.com',
+    websiteUrl: 'https://www.greenrow.com'
+  },
+  {
+    senderDomain: 'notices.rei.com',
+    brandName: 'REI',
+    brandDomain: 'rei.com',
+    websiteUrl: 'https://www.rei.com'
+  },
+  {
+    senderDomain: 'bm.revolve.com',
+    brandName: 'REVOLVE',
+    brandDomain: 'revolve.com',
+    websiteUrl: 'https://www.revolve.com'
+  },
+  {
+    senderDomain: 'beauty.sephora.com',
+    brandName: 'Sephora',
+    brandDomain: 'sephora.com',
+    websiteUrl: 'https://www.sephora.com'
+  },
+  {
+    senderDomain: 'autoemail.hm.com',
+    brandName: 'H&M',
+    brandDomain: 'hm.com',
+    websiteUrl: 'https://www.hm.com'
   }
 ];
 
