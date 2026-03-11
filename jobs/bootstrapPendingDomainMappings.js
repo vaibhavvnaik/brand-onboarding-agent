@@ -22,6 +22,156 @@ const DOMAIN_BOOTSTRAP = [
     brandName: 'Anker',
     brandDomain: 'anker.com',
     websiteUrl: 'https://www.anker.com'
+  },
+  {
+    senderDomain: 'e.dcsg.com',
+    brandName: "DICK'S Sporting Goods",
+    brandDomain: 'dickssportinggoods.com',
+    websiteUrl: 'https://www.dickssportinggoods.com'
+  },
+  {
+    senderDomain: 'abrandjeans.com',
+    brandName: 'Abrand Jeans',
+    brandDomain: 'abrandjeans.com',
+    websiteUrl: 'https://www.abrandjeans.com'
+  },
+  {
+    senderDomain: 'info.asics.com',
+    brandName: 'ASICS',
+    brandDomain: 'asics.com',
+    websiteUrl: 'https://www.asics.com'
+  },
+  {
+    senderDomain: 'email.abbavoyage.com',
+    brandName: 'ABBA Voyage',
+    brandDomain: 'abbavoyage.com',
+    websiteUrl: 'https://www.abbavoyage.com'
+  },
+  {
+    senderDomain: '1stincoffee.com',
+    brandName: '1st in Coffee',
+    brandDomain: '1stincoffee.com',
+    websiteUrl: 'https://www.1stincoffee.com'
+  },
+  {
+    senderDomain: 'emails.reebok.com',
+    brandName: 'Reebok',
+    brandDomain: 'reebok.com',
+    websiteUrl: 'https://www.reebok.com'
+  },
+  {
+    senderDomain: 'smile.colgate.com',
+    brandName: 'Colgate',
+    brandDomain: 'colgate.com',
+    websiteUrl: 'https://www.colgate.com'
+  },
+  {
+    senderDomain: 'b.express.com',
+    brandName: 'Express',
+    brandDomain: 'express.com',
+    websiteUrl: 'https://www.express.com'
+  },
+  {
+    senderDomain: 'e.rejuvenation.com',
+    brandName: 'Rejuvenation',
+    brandDomain: 'rejuvenation.com',
+    websiteUrl: 'https://www.rejuvenation.com'
+  },
+  {
+    senderDomain: 'int.revolve.com',
+    brandName: 'REVOLVE',
+    brandDomain: 'revolve.com',
+    websiteUrl: 'https://www.revolve.com'
+  },
+  {
+    senderDomain: 'p.revolve.com',
+    brandName: 'REVOLVE',
+    brandDomain: 'revolve.com',
+    websiteUrl: 'https://www.revolve.com'
+  },
+  {
+    senderDomain: 'email.columbia.com',
+    brandName: 'Columbia',
+    brandDomain: 'columbia.com',
+    websiteUrl: 'https://www.columbia.com'
+  },
+  {
+    senderDomain: 's.anthropologie.com',
+    brandName: 'Anthropologie',
+    brandDomain: 'anthropologie.com',
+    websiteUrl: 'https://www.anthropologie.com'
+  },
+  {
+    senderDomain: 'email.oldnavy.com',
+    brandName: 'Old Navy',
+    brandDomain: 'oldnavy.com',
+    websiteUrl: 'https://www.oldnavy.com'
+  },
+  {
+    senderDomain: 'edm.anker.com',
+    brandName: 'Anker',
+    brandDomain: 'anker.com',
+    websiteUrl: 'https://www.anker.com'
+  },
+  {
+    senderDomain: 's.freepeople.com',
+    brandName: 'Free People',
+    brandDomain: 'freepeople.com',
+    websiteUrl: 'https://www.freepeople.com'
+  },
+  {
+    senderDomain: 'e1.victoriassecret.com',
+    brandName: "Victoria's Secret",
+    brandDomain: 'victoriassecret.com',
+    websiteUrl: 'https://www.victoriassecret.com'
+  },
+  {
+    senderDomain: 'email.hm.com',
+    brandName: 'H&M',
+    brandDomain: 'hm.com',
+    websiteUrl: 'https://www.hm.com'
+  },
+  {
+    senderDomain: 'mail.madewell.com',
+    brandName: 'Madewell',
+    brandDomain: 'madewell.com',
+    websiteUrl: 'https://www.madewell.com'
+  },
+  {
+    senderDomain: 'emails.underarmour.com',
+    brandName: 'Under Armour',
+    brandDomain: 'underarmour.com',
+    websiteUrl: 'https://www.underarmour.com'
+  },
+  {
+    senderDomain: 'email.bananarepublic.com',
+    brandName: 'Banana Republic',
+    brandDomain: 'bananarepublic.com',
+    websiteUrl: 'https://www.bananarepublic.com'
+  },
+  {
+    senderDomain: 'email.gap.com',
+    brandName: 'GAP',
+    brandDomain: 'gap.com',
+    websiteUrl: 'https://www.gap.com'
+  },
+  {
+    senderDomain: 'eml.nordstrom.com',
+    brandName: 'Nordstrom',
+    brandDomain: 'nordstrom.com',
+    websiteUrl: 'https://www.nordstrom.com'
+  },
+  {
+    senderDomain: 'hello.us.lush.com',
+    brandName: 'Lush',
+    brandDomain: 'lush.com',
+    websiteUrl: 'https://www.lush.com'
+  },
+  {
+    senderDomain: 's.urbanoutfitters.com',
+    brandName: 'Urban Outfitters',
+    brandDomain: 'urbanoutfitters.com',
+    websiteUrl: 'https://www.urbanoutfitters.com'
   }
 ];
 
@@ -152,4 +302,3 @@ run().catch(async (err) => {
   try { await mongoose.disconnect(); } catch (_) {}
   process.exit(1);
 });
-
