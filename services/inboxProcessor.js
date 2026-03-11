@@ -778,7 +778,8 @@ async function processSingleMessage(messageId) {
 
 async function processInbox({ hours = 24, maxResults = 100 } = {}) {
   const since = Math.floor((Date.now() - hours * 3600 * 1000) / 1000);
-  const query = `to:${process.env.GMAIL_USER} after:${since} in:inbox`;
+  // Do not require explicit `to:` match; many newsletter ESPs use list aliases/BCC.
+  const query = `after:${since} in:inbox`;
 
   logger.info(`[scan_inbox] Querying Gmail: ${query}`);
   const refs = await searchMessages(query, maxResults);
@@ -844,7 +845,8 @@ async function processInboxFullHistory({
   query = null
 } = {}) {
   const gmail = await getGmailClient();
-  const baseQuery = String(query || `to:${process.env.GMAIL_USER} in:inbox`);
+  // Historical migration default should mirror inbox reality, not strict envelope `to:`.
+  const baseQuery = String(query || 'in:inbox');
   const safePageSize = Math.max(1, Math.min(500, Number(pageSize) || 500));
   const cap = Math.max(0, Number(maxResults) || 0);
   const stats = buildScanStats(0);

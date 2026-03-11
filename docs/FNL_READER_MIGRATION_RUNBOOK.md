@@ -42,7 +42,7 @@ These variables tune migration behavior safely:
 # Full history scan
 MIGRATION_SCAN_FULL_MAX_RESULTS=0      # 0 = no cap
 MIGRATION_SCAN_FULL_PAGE_SIZE=500
-MIGRATION_SCAN_FULL_QUERY=
+MIGRATION_SCAN_FULL_QUERY=             # default now uses `in:inbox`
 
 # Confirmation + ingestion passes
 MIGRATION_CONFIRMATION_PASSES=2
@@ -75,6 +75,12 @@ Optional conservative first pass:
 
 ```bash
 railway run env MIGRATION_SCAN_FULL_MAX_RESULTS=2000 MIGRATION_SKIP_BACKFILL=true npm run job:migrate
+```
+
+Optional full-inbox catch-up (recommended when older runs used `to:` filter):
+
+```bash
+railway run env MIGRATION_SCAN_FULL_QUERY="in:inbox" MIGRATION_SCAN_FULL_MAX_RESULTS=0 MIGRATION_SKIP_BACKFILL=false npm run job:migrate
 ```
 
 Then full pass:
