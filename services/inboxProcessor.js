@@ -4,6 +4,7 @@ const axios = require('axios');
 const {
   searchMessages,
   getGmailClient,
+  gmailCall,
   getMessage,
   parseMessage,
   extractSenderEmail,
@@ -809,7 +810,10 @@ function buildScanStats(fetched = 0) {
 }
 
 async function processMessageRefs(refs, stats, logPrefix) {
+  let loopCount = 0;
+  const startedAt = Date.now();
   for (const ref of refs) {
+    loopCount += 1;
     try {
       const existing = await EmailMessage.findOne({ gmailMessageId: ref.id })
         .select('processedBy state')
@@ -823,6 +827,10 @@ async function processMessageRefs(refs, stats, logPrefix) {
       if (result.matched) stats.matched += 1;
       else stats.unmatched += 1;
       stats.byType[result.emailType] = (stats.byType[result.emailType] || 0) + 1;
+      if (loopCount % 25 === 0 || loopCount === refs.length) {
+        const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+        logger.info(`[${logPrefix}] Progress ${loopCount}/${refs.length} (processed=${stats.processed}, matched=${stats.matched}, unmatched=${stats.unmatched}, elapsed=${elapsedSec}s)`);
+      }
       await sleep(120);
     } catch (err) {
       logger.warn(`[${logPrefix}] Failed to process message ${ref.id}: ${err.message}`);
@@ -852,12 +860,15 @@ async function processInboxFullHistory({
     const currentMax = cap > 0 ? Math.min(safePageSize, remaining) : safePageSize;
     if (currentMax <= 0) break;
 
-    const res = await gmail.users.messages.list({
-      userId: 'me',
-      q: baseQuery,
-      maxResults: currentMax,
-      pageToken: pageToken || undefined
-    });
+    const res = await gmailCall(
+      () => gmail.users.messages.list({
+        userId: 'me',
+        q: baseQuery,
+        maxResults: currentMax,
+        pageToken: pageToken || undefined
+      }),
+      { label: 'users.messages.list.full_history' }
+    );
 
     const refs = res.data?.messages || [];
     stats.pages += 1;

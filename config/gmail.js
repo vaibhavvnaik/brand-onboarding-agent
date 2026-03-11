@@ -5,6 +5,45 @@ const { google } = require('googleapis');
 const logger = require('../utils/logger');
 
 let _gmailClient = null;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function withTimeout(promise, ms, label = 'gmail_request_timeout') {
+  const timeoutMs = Math.max(1000, Number(ms) || 20000);
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(label);
+      err.code = 'GMAIL_TIMEOUT';
+      reject(err);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function gmailCall(executor, {
+  label = 'gmail_call',
+  timeoutMs = Number(process.env.GMAIL_REQUEST_TIMEOUT_MS || 20000),
+  retries = Number(process.env.GMAIL_REQUEST_RETRIES || 2)
+} = {}) {
+  const maxRetries = Math.max(0, Number(retries) || 0);
+  let lastErr = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      return await withTimeout(executor(), timeoutMs, `${label}_timeout`);
+    } catch (err) {
+      lastErr = err;
+      const status = Number(err?.response?.status || 0);
+      const retryable = err?.code === 'GMAIL_TIMEOUT' || status === 429 || status >= 500;
+      if (!retryable || attempt >= maxRetries) break;
+      const backoffMs = 500 * (attempt + 1);
+      logger.warn(`[gmail] ${label} failed (attempt ${attempt + 1}/${maxRetries + 1}): ${err.message}. Retrying in ${backoffMs}ms...`);
+      await sleep(backoffMs);
+    }
+  }
+  throw lastErr;
+}
 
 function getOAuthCredentials() {
   const clientId = String(process.env.GMAIL_CLIENT_ID || '').trim();
@@ -87,7 +126,10 @@ async function getGmailClient() {
     try {
       const auth = getOAuth2Client(candidate.token);
       const gmail = google.gmail({ version: 'v1', auth });
-      await gmail.users.getProfile({ userId: 'me' });
+      await gmailCall(
+        () => gmail.users.getProfile({ userId: 'me' }),
+        { label: 'users.getProfile' }
+      );
       _gmailClient = gmail;
       logger.info(`[OK] Gmail API connected for ${process.env.GMAIL_USER} (token_source=${candidate.source})`);
       if (candidate.source === 'db' && process.env.GMAIL_REFRESH_TOKEN && process.env.GMAIL_REFRESH_TOKEN !== candidate.token) {
@@ -105,13 +147,19 @@ async function getGmailClient() {
 
 async function searchMessages(query, maxResults = 20) {
   const gmail = await getGmailClient();
-  const res = await gmail.users.messages.list({ userId: 'me', q: query, maxResults });
+  const res = await gmailCall(
+    () => gmail.users.messages.list({ userId: 'me', q: query, maxResults }),
+    { label: 'users.messages.list' }
+  );
   return res.data.messages || [];
 }
 
 async function getMessage(messageId) {
   const gmail = await getGmailClient();
-  const res = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+  const res = await gmailCall(
+    () => gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' }),
+    { label: 'users.messages.get' }
+  );
   return res.data;
 }
 
@@ -257,6 +305,7 @@ module.exports = {
   getOAuth2Client,
   getRefreshToken,
   saveRefreshToken,
+  gmailCall,
   searchMessages,
   getMessage,
   parseMessage,
