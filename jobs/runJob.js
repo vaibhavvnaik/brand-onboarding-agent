@@ -6,7 +6,14 @@ const { processInbox, processInboxFullHistory } = require('../services/inboxProc
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
 const { ingestPendingNewsletters, backfillListingsFromEmailMessages, retakeListingScreenshots } = require('../services/newsletterIngestor');
 const { runLinkLegacyListingsToEmails } = require('./linkLegacyListingsToEmails');
-const { runScrubSensitiveContentBackfill } = require('./scrubSensitiveContentBackfill');
+const { backfillGmailLabelsForExistingEmails } = require('../services/gmailStatusLabels');
+let runScrubSensitiveContentBackfill = null;
+try {
+  ({ runScrubSensitiveContentBackfill } = require('./scrubSensitiveContentBackfill'));
+} catch (err) {
+  // Keep server bootable if this optional job module is absent in a deployment artifact.
+  if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+}
 
 async function runJob(job, options = {}) {
   switch (job) {
@@ -59,12 +66,20 @@ async function runJob(job, options = {}) {
         skipAlreadyRetaken: String(options.skipAlreadyRetaken ?? 'true') === 'true'
       });
     case 'scrub_sensitive_content':
+      if (typeof runScrubSensitiveContentBackfill !== 'function') {
+        throw new Error('scrub_sensitive_content job unavailable: missing jobs/scrubSensitiveContentBackfill.js');
+      }
       return runScrubSensitiveContentBackfill({
         dryRun: options.dryRun ?? process.env.SCRUB_SENSITIVE_DRY_RUN ?? 'false',
         emailBatchSize: Number(options.emailBatchSize ?? process.env.SCRUB_SENSITIVE_EMAIL_BATCH_SIZE ?? 200),
         listingBatchSize: Number(options.listingBatchSize ?? process.env.SCRUB_SENSITIVE_LISTING_BATCH_SIZE ?? 200),
         emailLimit: Number(options.emailLimit ?? process.env.SCRUB_SENSITIVE_EMAIL_LIMIT ?? 0),
         listingLimit: Number(options.listingLimit ?? process.env.SCRUB_SENSITIVE_LISTING_LIMIT ?? 0)
+      });
+    case 'backfill_gmail_labels':
+      return backfillGmailLabelsForExistingEmails({
+        limit: Number(options.limit ?? process.env.GMAIL_LABEL_BACKFILL_LIMIT ?? 2000),
+        dryRun: String(options.dryRun ?? process.env.GMAIL_LABEL_BACKFILL_DRY_RUN ?? 'false') === 'true'
       });
     default:
       throw new Error(`Unknown job: ${job}`);
@@ -74,7 +89,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings|link_legacy_listings_to_emails|scrub_sensitive_content>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels>');
     process.exit(1);
   }
 
