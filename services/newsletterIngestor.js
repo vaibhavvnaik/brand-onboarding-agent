@@ -107,10 +107,12 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
   const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 600);
   const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 1200);
   const stabilizeMs = readNumberEnv('NEWSLETTER_SCREENSHOT_STABILIZE_MS', 6000);
+  const retryStabilizeMs = readNumberEnv('NEWSLETTER_SCREENSHOT_RETRY_STABILIZE_MS', 5000);
   const maxImgWaitMs = readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_IMAGE_WAIT_MS', 12000);
   const maxCaptureHeight = readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_CAPTURE_HEIGHT', 2200);
   const forceWidthRewrite = readBoolEnv('NEWSLETTER_SCREENSHOT_FORCE_WIDTH_REWRITE', false);
   const minImageLoadRatio = Number(process.env.NEWSLETTER_SCREENSHOT_MIN_IMAGE_LOAD_RATIO || 0.35);
+  const maxQualityPasses = Math.max(1, readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_QUALITY_PASSES', 2));
   const ownBrowser = !sharedBrowser;
   const browser = sharedBrowser || await chromium.launch({
     headless: true,
@@ -229,41 +231,66 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
       return Promise.resolve();
     }).catch(() => {});
 
-    await page.waitForTimeout(stabilizeMs);
+    let quality = null;
+    let imgRatio = 1;
+    for (let pass = 1; pass <= maxQualityPasses; pass += 1) {
+      // Trigger common lazy-load behaviors that need scroll interaction.
+      await page.evaluate(() => {
+        const maxY = Math.max(
+          document.body?.scrollHeight || 0,
+          document.documentElement?.scrollHeight || 0
+        );
+        window.scrollTo(0, Math.min(maxY, window.innerHeight * 2));
+      }).catch(() => {});
+      await page.waitForTimeout(250);
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
 
-    const quality = await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      const loaded = imgs.filter((img) => img.complete && img.naturalWidth > 0).length;
-      let maxBottom = 0;
-      const nodes = Array.from(document.querySelectorAll('body *'));
-      for (const node of nodes) {
-        const rect = node.getBoundingClientRect();
-        if (!rect || rect.height <= 0 || rect.width <= 0) continue;
-        const text = (node.textContent || '').trim();
-        const hasText = text.length > 20;
-        const hasMedia = node.tagName === 'IMG';
-        if (hasText || hasMedia) {
-          maxBottom = Math.max(maxBottom, node.offsetTop + rect.height);
+      const waitMs = pass === 1 ? stabilizeMs : retryStabilizeMs;
+      await page.waitForTimeout(waitMs);
+
+      quality = await page.evaluate(() => {
+        const imgs = Array.from(document.querySelectorAll('img'));
+        const loaded = imgs.filter((img) => img.complete && img.naturalWidth > 0).length;
+        let maxBottom = 0;
+        const nodes = Array.from(document.querySelectorAll('body *'));
+        for (const node of nodes) {
+          const rect = node.getBoundingClientRect();
+          if (!rect || rect.height <= 0 || rect.width <= 0) continue;
+          const text = (node.textContent || '').trim();
+          const hasText = text.length > 20;
+          const hasMedia = node.tagName === 'IMG';
+          if (hasText || hasMedia) {
+            maxBottom = Math.max(maxBottom, node.offsetTop + rect.height);
+          }
         }
-      }
-      const body = document.body;
-      const doc = document.documentElement;
-      const scrollHeight = Math.max(
-        body ? body.scrollHeight : 0,
-        doc ? doc.scrollHeight : 0,
-        body ? body.offsetHeight : 0,
-        doc ? doc.offsetHeight : 0
-      );
-      return {
-        imgTotal: imgs.length,
-        imgLoaded: loaded,
-        scrollHeight,
-        meaningfulBottom: Math.ceil(maxBottom)
-      };
-    });
+        const body = document.body;
+        const doc = document.documentElement;
+        const scrollHeight = Math.max(
+          body ? body.scrollHeight : 0,
+          doc ? doc.scrollHeight : 0,
+          body ? body.offsetHeight : 0,
+          doc ? doc.offsetHeight : 0
+        );
+        return {
+          imgTotal: imgs.length,
+          imgLoaded: loaded,
+          scrollHeight,
+          meaningfulBottom: Math.ceil(maxBottom)
+        };
+      });
 
-    const imgRatio = quality.imgTotal > 0 ? (quality.imgLoaded / quality.imgTotal) : 1;
-    if (quality.imgTotal >= 8 && imgRatio < minImageLoadRatio) {
+      imgRatio = quality.imgTotal > 0 ? (quality.imgLoaded / quality.imgTotal) : 1;
+      const lowImageRatio = quality.imgTotal >= 8 && imgRatio < minImageLoadRatio;
+      const weakAboveFold = quality.meaningfulBottom < 260 && quality.scrollHeight > 500;
+      if (!lowImageRatio && !weakAboveFold) break;
+      if (pass < maxQualityPasses) {
+        logger.warn(
+          `[screenshot] quality retry ${pass}/${maxQualityPasses} for ${message.gmailMessageId}: loaded=${quality.imgLoaded}/${quality.imgTotal}, meaningfulBottom=${quality.meaningfulBottom}`
+        );
+      }
+    }
+
+    if (quality?.imgTotal >= 8 && imgRatio < minImageLoadRatio) {
       logger.warn(`[screenshot] Low image-load ratio for ${message.gmailMessageId}: loaded=${quality.imgLoaded}/${quality.imgTotal}`);
     }
 
@@ -399,6 +426,14 @@ async function uploadScreenshotToB2(filePath, key, maxRetries = 3) {
     }
   }
   return null;
+}
+
+function buildVersionedScreenshotFileName({ subject = 'newsletter', messageId, suffix = '' }) {
+  const safeTitle = slugifyText(subject || 'newsletter') || 'newsletter';
+  const safeId = String(messageId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const version = Date.now().toString(36);
+  const normalizedSuffix = suffix ? `-${suffix}` : '';
+  return `${safeTitle}-${safeId}${normalizedSuffix}-v${version}.png`;
 }
 
 async function getOrCreateDefaultCategoryId() {
@@ -557,7 +592,10 @@ async function materializeListingForMessage({ message, brand, withScreenshots = 
     try {
       screenshotPath = await screenshotEmailMessage(message);
       if (screenshotPath) {
-        const fileName = `${slugifyText(message.subject || 'newsletter') || 'newsletter'}-${message.gmailMessageId}.png`;
+        const fileName = buildVersionedScreenshotFileName({
+          subject: message.subject || 'newsletter',
+          messageId: message.gmailMessageId
+        });
         screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
         if (screenshotUrl) {
           await markEmailActivity({
@@ -693,6 +731,7 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
 
   const candidates = await EmailMessage.find({
     emailType: { $in: ['newsletter', 'welcome'] },
+    brandId: { $exists: true, $ne: null },
     $or: [
       { ingestedAt: { $exists: false } },
       { ingestedAt: null }
@@ -1001,7 +1040,10 @@ async function backfillListingsFromEmailMessages({
 async function retakeListingScreenshots({
   limit = 100,
   dryRun = false,
-  skipAlreadyRetaken = true
+  skipAlreadyRetaken = true,
+  untilExhausted = false,
+  batchSize = null,
+  maxBatches = 250
 } = {}) {
   const db = mongoose.connection.db;
   const listingCol = db.collection('Listing');
@@ -1016,17 +1058,13 @@ async function retakeListingScreenshots({
     query.screenshotRetakenAt = { $exists: false };
   }
 
-  const listings = await listingCol.find(query)
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .toArray();
-
   const stats = {
-    scanned: listings.length,
+    scanned: 0,
     retaken: 0,
     skippedNoHtml: 0,
     skippedB2Disabled: 0,
-    failed: 0
+    failed: 0,
+    batches: 0
   };
 
   const b2Enabled = canUseB2();
@@ -1045,7 +1083,22 @@ async function retakeListingScreenshots({
   });
   logger.info('[retake_screenshots] Shared browser launched successfully');
 
+  const normalizedBatchSize = Math.max(1, Number(batchSize || limit) || 100);
+  const normalizedMaxBatches = Math.max(1, Number(maxBatches) || 250);
+
   try {
+  for (let batch = 0; batch < normalizedMaxBatches; batch += 1) {
+    const effectiveLimit = untilExhausted ? normalizedBatchSize : Math.max(1, Number(limit) || 100);
+    const listings = await listingCol.find(query)
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(effectiveLimit)
+      .toArray();
+    if (!listings.length) {
+      break;
+    }
+    stats.batches += 1;
+    stats.scanned += listings.length;
+
   for (const listing of listings) {
     try {
       // Get HTML: prefer listing.htmlContent, fallback to linked EmailMessage.bodyHtml
@@ -1079,8 +1132,11 @@ async function retakeListingScreenshots({
       }
 
       // Upload to B2
-      const safeTitle = slugifyText(listing.title || 'newsletter') || 'newsletter';
-      const fileName = safeTitle + '-' + pseudoMessage.gmailMessageId + '-retake.png';
+      const fileName = buildVersionedScreenshotFileName({
+        subject: listing.title || 'newsletter',
+        messageId: pseudoMessage.gmailMessageId,
+        suffix: 'retake'
+      });
       const screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
 
       // Update Listing.content with new screenshot URL
@@ -1095,6 +1151,10 @@ async function retakeListingScreenshots({
           { gmailMessageId: listing.messageId },
           { $set: { screenshotPath: screenshotUrl } }
         );
+        await markEmailActivity({
+          gmailMessageId: listing.messageId,
+          activity: 'screenshot_captured'
+        });
       }
 
       // Clean up temp file
@@ -1122,6 +1182,8 @@ async function retakeListingScreenshots({
       logger.warn('[retake_screenshots] ' + (listing._id) + ': ' + err.message);
       stats.failed += 1;
     }
+  }
+    if (!untilExhausted) break;
   }
 
   } finally {

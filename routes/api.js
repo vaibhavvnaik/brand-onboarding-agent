@@ -970,9 +970,16 @@ router.post('/agent/backfill-screenshots', async (req, res) => {
 
 router.post('/agent/retake-screenshots', async (req, res) => {
   try {
-    const { limit = 100, dryRun = false, skipAlreadyRetaken = true } = req.body || {};
-    res.json({ message: 'Retake started', options: { limit, dryRun, skipAlreadyRetaken } });
-    retakeListingScreenshots({ limit, dryRun, skipAlreadyRetaken }).catch(err => {
+    const {
+      limit = 100,
+      dryRun = false,
+      skipAlreadyRetaken = true,
+      untilExhausted = false,
+      batchSize = null,
+      maxBatches = 250
+    } = req.body || {};
+    res.json({ message: 'Retake started', options: { limit, dryRun, skipAlreadyRetaken, untilExhausted, batchSize, maxBatches } });
+    retakeListingScreenshots({ limit, dryRun, skipAlreadyRetaken, untilExhausted, batchSize, maxBatches }).catch(err => {
       console.error('[retake-screenshots] error:', err.message);
     });
   } catch (err) {

@@ -68,7 +68,10 @@ async function runJob(job, options = {}) {
       return retakeListingScreenshots({
         limit: Number(options.limit || 100),
         dryRun: String(options.dryRun ?? 'false') === 'true',
-        skipAlreadyRetaken: String(options.skipAlreadyRetaken ?? 'true') === 'true'
+        skipAlreadyRetaken: String(options.skipAlreadyRetaken ?? 'true') === 'true',
+        untilExhausted: String(options.untilExhausted ?? 'false') === 'true',
+        batchSize: Number(options.batchSize || 0) || null,
+        maxBatches: Number(options.maxBatches || 250)
       });
     case 'retry_missing_screenshots':
       return retryMissingScreenshotsForIngested({
@@ -98,7 +101,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|retry_missing_screenshots|backfill_listings|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|retry_missing_screenshots|backfill_listings|retake_screenshots|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels>');
     process.exit(1);
   }
 
