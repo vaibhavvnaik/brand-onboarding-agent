@@ -76,7 +76,7 @@ function extractDiscountText(subject = '') {
   return match[1];
 }
 
-async function screenshotEmailMessage(message) {
+async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
   ensureOutputDir();
   const safeId = String(message.gmailMessageId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
   const filePath = path.join(OUTPUT_DIR, `${safeId}.png`);
@@ -88,7 +88,8 @@ async function screenshotEmailMessage(message) {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
   const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 600);
   const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 1200);
-  const browser = await chromium.launch({
+  const ownBrowser = !sharedBrowser;
+  const browser = sharedBrowser || await chromium.launch({
     headless: true,
     executablePath,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
@@ -143,7 +144,7 @@ async function screenshotEmailMessage(message) {
     await page.screenshot({ path: filePath });
     return filePath;
   } finally {
-    await browser.close().catch(() => {});
+    if (ownBrowser) await browser.close().catch(() => {});
   }
 }
 
@@ -725,6 +726,16 @@ async function retakeListingScreenshots({
     return stats;
   }
 
+  // Launch a single shared browser for all retakes
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
+  const sharedBrowser = await chromium.launch({
+    headless: true,
+    executablePath,
+    args: ['--no-sandbox', '--disable-dev-shm-usage']
+  });
+  logger.info('[retake_screenshots] Shared browser launched successfully');
+
+  try {
   for (const listing of listings) {
     try {
       // Get HTML: prefer listing.htmlContent, fallback to linked EmailMessage.bodyHtml
@@ -751,7 +762,7 @@ async function retakeListingScreenshots({
         gmailMessageId: listing.messageId || String(listing._id)
       };
 
-      const screenshotPath = await screenshotEmailMessage(pseudoMessage);
+      const screenshotPath = await screenshotEmailMessage(pseudoMessage, { sharedBrowser });
       if (!screenshotPath) {
         stats.skippedNoHtml += 1;
         continue;
@@ -789,6 +800,11 @@ async function retakeListingScreenshots({
       logger.warn('[retake_screenshots] ' + (listing._id) + ': ' + err.message);
       stats.failed += 1;
     }
+  }
+
+  } finally {
+    await sharedBrowser.close().catch(() => {});
+    logger.info('[retake_screenshots] Shared browser closed');
   }
 
   logger.info('[retake_screenshots] Completed: ' + JSON.stringify(stats));
