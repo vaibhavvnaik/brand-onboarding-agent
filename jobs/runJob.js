@@ -11,7 +11,10 @@ const {
   retryMissingScreenshotsForIngested
 } = require('../services/newsletterIngestor');
 const { runLinkLegacyListingsToEmails } = require('./linkLegacyListingsToEmails');
-const { backfillGmailLabelsForExistingEmails } = require('../services/gmailStatusLabels');
+const {
+  backfillGmailLabelsForExistingEmails,
+  backfillScreenshotCapturedLabelFast
+} = require('../services/gmailStatusLabels');
 let runScrubSensitiveContentBackfill = null;
 try {
   ({ runScrubSensitiveContentBackfill } = require('./scrubSensitiveContentBackfill'));
@@ -93,6 +96,12 @@ async function runJob(job, options = {}) {
         limit: Number(options.limit ?? process.env.GMAIL_LABEL_BACKFILL_LIMIT ?? 2000),
         dryRun: String(options.dryRun ?? process.env.GMAIL_LABEL_BACKFILL_DRY_RUN ?? 'false') === 'true'
       });
+    case 'backfill_gmail_screenshot_label_fast':
+      return backfillScreenshotCapturedLabelFast({
+        limit: Number(options.limit ?? process.env.GMAIL_LABEL_FAST_LIMIT ?? 0),
+        batchSize: Number(options.batchSize ?? process.env.GMAIL_LABEL_FAST_BATCH_SIZE ?? 500),
+        dryRun: String(options.dryRun ?? process.env.GMAIL_LABEL_FAST_DRY_RUN ?? 'false') === 'true'
+      });
     default:
       throw new Error(`Unknown job: ${job}`);
   }
@@ -101,7 +110,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|retry_missing_screenshots|backfill_listings|retake_screenshots|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|retry_missing_screenshots|backfill_listings|retake_screenshots|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels|backfill_gmail_screenshot_label_fast>');
     process.exit(1);
   }
 

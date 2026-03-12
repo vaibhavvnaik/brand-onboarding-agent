@@ -115,8 +115,8 @@ async function getGmailClient() {
   const envToken = getRefreshTokenFromEnv();
   const dbToken = await getRefreshTokenFromDb();
   const candidates = [
-    { source: 'env', token: envToken },
-    { source: 'db', token: dbToken }
+    { source: 'db', token: dbToken },
+    { source: 'env', token: envToken }
   ].filter((row) => row.token);
 
   if (!candidates.length) throw new Error('No Gmail token configured. Visit /setup/gmail to connect Gmail.');

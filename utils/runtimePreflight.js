@@ -98,8 +98,7 @@ async function ensurePlaywrightRuntimeReady({ autoInstall = true } = {}) {
 
   checkingPromise = (async () => {
     withLibraryPaths();
-    const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
-    const installAllowed = autoInstall && envFlag('PLAYWRIGHT_PREFLIGHT_AUTO_INSTALL', !isProduction);
+    const installAllowed = autoInstall && envFlag('PLAYWRIGHT_PREFLIGHT_AUTO_INSTALL', true);
     runtimeState.checkedAt = new Date();
 
     try {

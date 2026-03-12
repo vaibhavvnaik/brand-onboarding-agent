@@ -7,8 +7,15 @@ const WorkflowRunSchema = new mongoose.Schema(
       enum: [
         'discover_and_signup',
         'scan_inbox',
+        'scan_inbox_full_history',
         'process_confirmations',
         'ingest_newsletters',
+        'retry_missing_screenshots',
+        'retake_screenshots',
+        'backfill_listings',
+        'link_legacy_listings_to_emails',
+        'scrub_sensitive_content',
+        'backfill_gmail_labels',
         'run_simplified_cycle'
       ],
       required: true
