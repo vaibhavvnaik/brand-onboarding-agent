@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   branch-and-assign:
-    name: Label → Branch → Assign Claude
+    name: Label → Branch → Trigger Claude
     runs-on: ubuntu-latest
 
     # Safety: never react to bots opening issues
@@ -124,20 +124,42 @@ jobs:
             core.setOutput('default_branch', repo.default_branch);
             console.log(`Branch created: ${branchName}`);
 
-      # ── 3. Assign Claude GitHub app to the issue ───────────────────
-      #    The Claude app (already installed) picks up the issue automatically
-      #    when assigned. No API key needed — it's handled by GitHub Agent HQ.
-      - name: Assign Claude agent to issue
+      # ── 3. Trigger Claude coding agent via @claude mention ─────────
+      #    The Claude GitHub app picks up issues when mentioned with @claude.
+      #    This replaces the broken addAssignees approach.
+      - name: Trigger Claude agent via comment
         uses: actions/github-script@v7
+        env:
+          BRANCH_NAME: ${{ steps.branch.outputs.branch_name }}
         with:
           script: |
-            await github.rest.issues.addAssignees({
+            const issue = context.payload.issue;
+            const branch = process.env.BRANCH_NAME;
+
+            const body = [
+              `@claude`,
+              ``,
+              `Please implement the following issue on branch \`${branch}\`:`,
+              ``,
+              `**${issue.title}**`,
+              ``,
+              issue.body ? issue.body.slice(0, 3000) : '_No description provided._',
+              ``,
+              `---`,
+              `**Instructions:**`,
+              `- Work on branch \`${branch}\` (already created)`,
+              `- Commit and push your changes to that branch`,
+              `- Do NOT open a pull request — the maintainer will do that`,
+              `- Keep commits focused and well-described`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
               owner:        context.repo.owner,
               repo:         context.repo.repo,
-              issue_number: context.payload.issue.number,
-              assignees:    ['claude']
+              issue_number: issue.number,
+              body
             });
-            console.log('Assigned to: claude');
+            console.log('Posted @claude trigger comment');
 
       # ── 4. Post a status comment on the issue ─────────────────────
       - name: Post pipeline status comment
