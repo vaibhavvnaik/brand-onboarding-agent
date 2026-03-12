@@ -10,6 +10,7 @@ const logger = require('../utils/logger');
 const { markEmailActivity } = require('./gmailStatusLabels');
 const { normalizeDomain, getRegistrableDomain } = require('../utils/domainIdentity');
 const { scrubSensitiveContent } = require('../utils/contentScrubber');
+const { ensurePlaywrightRuntimeReady } = require('../utils/runtimePreflight');
 
 const OUTPUT_DIR = path.join(__dirname, '../artifacts/newsletters');
 const DEFAULT_CATEGORY_NAME = 'Uncategorized';
@@ -543,7 +544,44 @@ async function markMessageIngestResult({ message, success, error = null, version
   }
 }
 
+async function markMessageIngestRetryPending({ message, reason = 'screenshot_missing', version = 'v2' }) {
+  message.processedBy = message.processedBy || {};
+  message.processedBy.ingestion_runner = {
+    done: false,
+    at: new Date(),
+    version,
+    attempts: (message.processedBy?.ingestion_runner?.attempts || 0) + 1,
+    status: 'retry_pending',
+    lastProcessedAt: new Date(),
+    error: reason
+  };
+  if (!['ingested', 'finalized'].includes(String(message.state || ''))) {
+    message.state = 'brand_resolved';
+  }
+  message.needsReview = false;
+  message.processingTrace = {
+    ...(message.processingTrace || {}),
+    ingest: {
+      at: new Date(),
+      status: 'retry_pending',
+      error: reason
+    }
+  };
+}
+
 async function ingestPendingNewsletters({ limit = 50 } = {}) {
+  const requireScreenshot = String(process.env.INGEST_REQUIRE_SCREENSHOT ?? 'true').toLowerCase() !== 'false';
+  const preflightAutoInstall = String(process.env.INGEST_PREFLIGHT_AUTO_INSTALL ?? 'false').toLowerCase() === 'true';
+  if (requireScreenshot) {
+    if (!canUseB2()) {
+      throw new Error('screenshot_required_but_b2_not_configured');
+    }
+    const runtime = await ensurePlaywrightRuntimeReady({ autoInstall: preflightAutoInstall });
+    if (!runtime?.ready) {
+      throw new Error(`ingest_runtime_preflight_failed:${runtime?.reason || 'unknown'}`);
+    }
+  }
+
   const candidates = await EmailMessage.find({
     emailType: { $in: ['newsletter', 'welcome'] },
     $or: [
@@ -558,7 +596,9 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
     scanned: candidates.length,
     ingested: 0,
     failed: 0,
-    skipped: 0
+    skipped: 0,
+    screenshotMissing: 0,
+    requireScreenshot
   };
 
   for (const message of candidates) {
@@ -613,6 +653,18 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
         withScreenshots: true,
         context: 'ingest_newsletters'
       });
+      if (requireScreenshot && !materialized?.screenshotUrl) {
+        await markMessageIngestRetryPending({ message, reason: 'screenshot_missing', version: 'v2' });
+        await message.save();
+        await markEmailActivity({
+          gmailMessageId: message.gmailMessageId,
+          activity: 'ingestion_skipped',
+          emailMessage: message
+        });
+        stats.skipped += 1;
+        stats.screenshotMissing += 1;
+        continue;
+      }
       message.screenshotPath = materialized.screenshotUrl;
       await markMessageIngestResult({ message, success: true, version: 'v2' });
       await message.save();
@@ -643,6 +695,94 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
   }
 
   logger.info(`[ingest_newsletters] Completed: ${JSON.stringify(stats)}`);
+  return stats;
+}
+
+async function retryMissingScreenshotsForIngested({ limit = 50 } = {}) {
+  const safeLimit = Math.max(1, Number(limit) || 50);
+  if (!canUseB2()) {
+    throw new Error('retry_missing_screenshots_requires_b2');
+  }
+  const runtime = await ensurePlaywrightRuntimeReady({ autoInstall: false });
+  if (!runtime?.ready) {
+    throw new Error(`retry_missing_screenshots_runtime_preflight_failed:${runtime?.reason || 'unknown'}`);
+  }
+
+  const candidates = await EmailMessage.find({
+    emailType: { $in: ['newsletter', 'welcome'] },
+    $or: [
+      { ingestedAt: { $exists: true, $ne: null } },
+      { state: { $in: ['ingested', 'finalized'] } },
+      { 'processedBy.ingestion_runner.done': true }
+    ],
+    $and: [
+      {
+        $or: [
+          { screenshotPath: { $exists: false } },
+          { screenshotPath: null },
+          { screenshotPath: '' },
+          { screenshotPath: { $not: /^https?:\/\//i } }
+        ]
+      }
+    ],
+    brandId: { $exists: true, $ne: null }
+  })
+    .sort({ receivedAt: -1 })
+    .limit(safeLimit);
+
+  const stats = {
+    scanned: candidates.length,
+    repaired: 0,
+    stillMissing: 0,
+    failed: 0
+  };
+
+  for (const message of candidates) {
+    try {
+      const brand = await Brand.findById(message.brandId);
+      if (!brand) {
+        stats.failed += 1;
+        continue;
+      }
+      const materialized = await materializeListingForMessage({
+        message,
+        brand,
+        withScreenshots: true,
+        forceScreenshotRetake: true,
+        context: 'retry_missing_screenshots'
+      });
+      if (!materialized?.screenshotUrl) {
+        await markMessageIngestRetryPending({ message, reason: 'screenshot_missing', version: 'v2' });
+        await message.save();
+        await markEmailActivity({
+          gmailMessageId: message.gmailMessageId,
+          activity: 'ingestion_skipped',
+          emailMessage: message
+        });
+        stats.stillMissing += 1;
+        continue;
+      }
+      message.screenshotPath = materialized.screenshotUrl;
+      await markMessageIngestResult({ message, success: true, version: 'v2' });
+      await message.save();
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'screenshot_captured',
+        emailMessage: message
+      });
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'ingested',
+        emailMessage: message
+      });
+      stats.repaired += 1;
+    } catch (err) {
+      stats.failed += 1;
+      logger.warn(`[retry_missing_screenshots] ${message.gmailMessageId}: ${err.message}`);
+    }
+  }
+
+  logger.info(`[retry_missing_screenshots] Completed: ${JSON.stringify(stats)}`);
   return stats;
 }
 
@@ -888,5 +1028,6 @@ async function retakeListingScreenshots({
 module.exports = {
   ingestPendingNewsletters,
   backfillListingsFromEmailMessages,
-  retakeListingScreenshots
+  retakeListingScreenshots,
+  retryMissingScreenshotsForIngested
 };

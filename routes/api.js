@@ -15,7 +15,12 @@ const { ensureBrandLogo } = require('../services/brandLogo');
 const { scanRecentEmails } = require('../services/emailChangeDetector');
 const { processInbox } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
-const { ingestPendingNewsletters, backfillListingsFromEmailMessages, retakeListingScreenshots } = require('../services/newsletterIngestor');
+const {
+  ingestPendingNewsletters,
+  backfillListingsFromEmailMessages,
+  retakeListingScreenshots,
+  retryMissingScreenshotsForIngested
+} = require('../services/newsletterIngestor');
 const { runJob } = require('../jobs/runJob');
 const logger = require('../utils/logger');
 const ActivityLog = require('../models/ActivityLog');
@@ -454,6 +459,7 @@ router.post('/agent/run-simplified-cycle', async (req, res) => {
     const scan_inbox = await runStepWithTracking('scan_inbox', options, { source: 'run_simplified_cycle' });
     const process_confirmations = await runStepWithTracking('process_confirmations', options, { source: 'run_simplified_cycle' });
     const ingest_newsletters = await runStepWithTracking('ingest_newsletters', options, { source: 'run_simplified_cycle' });
+    const retry_missing_screenshots = await runStepWithTracking('retry_missing_screenshots', options, { source: 'run_simplified_cycle' });
 
     const result = {
       startedAt,
@@ -461,13 +467,28 @@ router.post('/agent/run-simplified-cycle', async (req, res) => {
       scan_inbox,
       process_confirmations,
       ingest_newsletters,
+      retry_missing_screenshots,
       completedAt: new Date().toISOString()
     };
 
-    const hasFailure = [discover_and_signup, scan_inbox, process_confirmations, ingest_newsletters]
+    const hasFailure = [discover_and_signup, scan_inbox, process_confirmations, ingest_newsletters, retry_missing_screenshots]
       .some((s) => s.status !== 'success');
     await completeWorkflowRun(run, hasFailure ? 'failed' : 'success', result, hasFailure ? 'One or more steps failed' : null);
     res.status(hasFailure ? 207 : 200).json({ success: !hasFailure, ...result });
+  } catch (err) {
+    await completeWorkflowRun(run, 'failed', null, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** POST /api/agent/retry-missing-screenshots */
+router.post('/agent/retry-missing-screenshots', async (req, res) => {
+  const run = await startWorkflowRun('retry_missing_screenshots', { body: req.body || {} });
+  try {
+    const { limit = 50 } = req.body || {};
+    const result = await retryMissingScreenshotsForIngested({ limit });
+    await completeWorkflowRun(run, 'success', result, null);
+    res.json({ success: true, ...result });
   } catch (err) {
     await completeWorkflowRun(run, 'failed', null, err.message);
     res.status(500).json({ error: err.message });

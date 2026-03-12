@@ -4,7 +4,12 @@ const { connectDB } = require('../config/database');
 const { run } = require('../agents/brandOnboardingAgent');
 const { processInbox, processInboxFullHistory } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
-const { ingestPendingNewsletters, backfillListingsFromEmailMessages, retakeListingScreenshots } = require('../services/newsletterIngestor');
+const {
+  ingestPendingNewsletters,
+  backfillListingsFromEmailMessages,
+  retakeListingScreenshots,
+  retryMissingScreenshotsForIngested
+} = require('../services/newsletterIngestor');
 const { runLinkLegacyListingsToEmails } = require('./linkLegacyListingsToEmails');
 const { backfillGmailLabelsForExistingEmails } = require('../services/gmailStatusLabels');
 let runScrubSensitiveContentBackfill = null;
@@ -65,6 +70,10 @@ async function runJob(job, options = {}) {
         dryRun: String(options.dryRun ?? 'false') === 'true',
         skipAlreadyRetaken: String(options.skipAlreadyRetaken ?? 'true') === 'true'
       });
+    case 'retry_missing_screenshots':
+      return retryMissingScreenshotsForIngested({
+        limit: Number(options.limit || process.env.RETRY_MISSING_SCREENSHOTS_LIMIT || 50)
+      });
     case 'scrub_sensitive_content':
       if (typeof runScrubSensitiveContentBackfill !== 'function') {
         throw new Error('scrub_sensitive_content job unavailable: missing jobs/scrubSensitiveContentBackfill.js');
@@ -89,7 +98,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|retry_missing_screenshots|backfill_listings|link_legacy_listings_to_emails|scrub_sensitive_content|backfill_gmail_labels>');
     process.exit(1);
   }
 

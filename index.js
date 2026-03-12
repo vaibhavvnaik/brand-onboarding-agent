@@ -93,7 +93,8 @@ function startInternalScheduler() {
     batchSize: Number(process.env.INTERNAL_CRON_BATCH_SIZE || process.env.BATCH_SIZE || 10),
     inboxHours: Number(process.env.INTERNAL_CRON_INBOX_HOURS || process.env.SCAN_HOURS || 24),
     maxInboxResults: Number(process.env.INTERNAL_CRON_MAX_INBOX_RESULTS || process.env.SCAN_MAX_RESULTS || 0),
-    limit: Number(process.env.INTERNAL_CRON_STEP_LIMIT || 50)
+    limit: Number(process.env.INTERNAL_CRON_STEP_LIMIT || 50),
+    retryMissingScreenshotsLimit: Number(process.env.INTERNAL_CRON_RETRY_MISSING_SCREENSHOTS_LIMIT || 50)
   };
 
   if (!enabled) {
@@ -129,6 +130,10 @@ function startInternalScheduler() {
       results.push(await runStepWithTracking('scan_inbox', options));
       results.push(await runStepWithTracking('process_confirmations', options));
       results.push(await runStepWithTracking('ingest_newsletters', options));
+      results.push(await runStepWithTracking('retry_missing_screenshots', {
+        ...options,
+        limit: options.retryMissingScreenshotsLimit
+      }));
 
       const hasFailure = results.some((r) => r.status !== 'success');
       const completedAt = new Date();
