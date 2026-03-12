@@ -24,9 +24,10 @@ jobs:
       github.actor != 'dependabot[bot]'
 
     steps:
-      # ── 1. Simple keyword-based labeling (no API cost) ─────────────
+      # ── 1. Simple keyword-based labeling (non-blocking) ────────────
       - name: Auto-label by keywords
         id: label
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           script: |
@@ -42,12 +43,13 @@ jobs:
             else if (/\b(refactor|restructure|rewrite|cleanup|clean up|reorganize)\b/.test(text))  typeLabel = 'refactor';
             else if (/\b(chore|ci|config|setup|infra|dependency|deps|bump)\b/.test(text))          typeLabel = 'chore';
 
+            // Try to ensure labels exist, skip gracefully if creation fails
+            const labelsToAdd = [];
             const labelDefs = [
               [typeLabel,         '0075ca', 'Issue type'],
               ['agent-assigned',  '6f42c1', 'Coding agent is working on this'],
             ];
 
-            // Ensure every label exists in the repo
             for (const [name, color, description] of labelDefs) {
               try {
                 await github.rest.issues.getLabel({
@@ -55,24 +57,33 @@ jobs:
                   repo:  context.repo.repo,
                   name
                 });
+                labelsToAdd.push(name);
               } catch {
-                await github.rest.issues.createLabel({
-                  owner: context.repo.owner,
-                  repo:  context.repo.repo,
-                  name, color, description
-                });
+                // Label doesn't exist — try to create it
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo:  context.repo.repo,
+                    name, color, description
+                  });
+                  labelsToAdd.push(name);
+                } catch (createErr) {
+                  console.log(`Could not create label "${name}": ${createErr.message} — skipping`);
+                }
               }
             }
 
-            await github.rest.issues.addLabels({
-              owner:        context.repo.owner,
-              repo:         context.repo.repo,
-              issue_number: issue.number,
-              labels:       labelDefs.map(([n]) => n)
-            });
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: issue.number,
+                labels:       labelsToAdd
+              });
+              console.log(`Applied labels: ${labelsToAdd.join(', ')}`);
+            }
 
             core.setOutput('type_label', typeLabel);
-            console.log(`Labelled as: ${typeLabel}`);
 
       # ── 2. Create a dedicated branch ───────────────────────────────
       - name: Create feature branch
@@ -140,12 +151,13 @@ jobs:
             const issue      = context.payload.issue;
             const repoUrl    = `https://github.com/${context.repo.owner}/${context.repo.repo}`;
             const branchUrl  = `${repoUrl}/tree/${process.env.BRANCH_NAME}`;
+            const typeLabel  = process.env.TYPE_LABEL || 'task';
 
             const body = `## 🚀 Issue Pipeline Activated
 
             | Field | Value |
             |-------|-------|
-            | **Type** | \`${process.env.TYPE_LABEL}\` |
+            | **Type** | \`${typeLabel}\` |
             | **Assigned Agent** | 🤖 Claude |
             | **Branch** | [\`${process.env.BRANCH_NAME}\`](${branchUrl}) |
 
