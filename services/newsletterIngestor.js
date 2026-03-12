@@ -94,8 +94,9 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
     executablePath,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
+  let page;
   try {
-    const page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
+    page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
     await page.setContent(html, { waitUntil: 'networkidle', timeout: 30000 });
 
     // Inject CSS to force email content to fill the viewport width.
@@ -144,6 +145,7 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
     await page.screenshot({ path: filePath });
     return filePath;
   } finally {
+    if (page) await page.close().catch(() => {});
     if (ownBrowser) await browser.close().catch(() => {});
   }
 }
@@ -728,7 +730,7 @@ async function retakeListingScreenshots({
 
   // Launch a single shared browser for all retakes
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
-  const sharedBrowser = await chromium.launch({
+  let sharedBrowser = await chromium.launch({
     headless: true,
     executablePath,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
@@ -795,6 +797,18 @@ async function retakeListingScreenshots({
       stats.retaken += 1;
       if (stats.retaken % 10 === 0) {
         logger.info('[retake_screenshots] Progress: ' + JSON.stringify(stats));
+        // Recycle browser every 10 successful screenshots to prevent memory buildup
+        try {
+          await sharedBrowser.close().catch(() => {});
+          sharedBrowser = await chromium.launch({
+            headless: true,
+            executablePath,
+            args: ['--no-sandbox', '--disable-dev-shm-usage']
+          });
+          logger.info('[retake_screenshots] Browser recycled after ' + stats.retaken + ' screenshots');
+        } catch (recycleErr) {
+          logger.warn('[retake_screenshots] Browser recycle failed: ' + recycleErr.message);
+        }
       }
     } catch (err) {
       logger.warn('[retake_screenshots] ' + (listing._id) + ': ' + err.message);
