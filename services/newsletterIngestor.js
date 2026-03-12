@@ -663,7 +663,123 @@ async function backfillListingsFromEmailMessages({
   return stats;
 }
 
+/**
+ * Re-take screenshots for existing Listing records using correct 600px viewport.
+ * Works by iterating directly over the Listing collection (not EmailMessage),
+ * finding the HTML content either from the Listing.htmlContent field or from
+ * the linked EmailMessage.bodyHtml, then re-rendering and uploading to B2.
+ */
+async function retakeListingScreenshots({
+  limit = 100,
+  dryRun = false,
+  skipAlreadyRetaken = true
+} = {}) {
+  const db = mongoose.connection.db;
+  const listingCol = db.collection('Listing');
+
+  // Find listings that have a screenshot URL in content
+  // AND have either htmlContent on the listing or a linked messageId
+  const query = {
+    content: { $regex: '^https?://', $options: 'i' }
+  };
+
+  if (skipAlreadyRetaken) {
+    query.screenshotRetakenAt = { $exists: false };
+  }
+
+  const listings = await listingCol.find(query)
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .toArray();
+
+  const stats = {
+    scanned: listings.length,
+    retaken: 0,
+    skippedNoHtml: 0,
+    skippedB2Disabled: 0,
+    failed: 0
+  };
+
+  const b2Enabled = canUseB2();
+  if (!b2Enabled) {
+    logger.warn('[retake_screenshots] B2 not configured; aborting.');
+    stats.skippedB2Disabled = stats.scanned;
+    return stats;
+  }
+
+  for (const listing of listings) {
+    try {
+      // Get HTML: prefer listing.htmlContent, fallback to linked EmailMessage.bodyHtml
+      let html = listing.htmlContent || null;
+
+      if (!html && listing.messageId) {
+        const email = await EmailMessage.findOne({ gmailMessageId: listing.messageId });
+        html = email?.bodyHtml || null;
+      }
+
+      if (!html) {
+        stats.skippedNoHtml += 1;
+        continue;
+      }
+
+      if (dryRun) {
+        stats.retaken += 1;
+        continue;
+      }
+
+      // Build a minimal message object for screenshotEmailMessage
+      const pseudoMessage = {
+        bodyHtml: html,
+        gmailMessageId: listing.messageId || String(listing._id)
+      };
+
+      const screenshotPath = await screenshotEmailMessage(pseudoMessage);
+      if (!screenshotPath) {
+        stats.skippedNoHtml += 1;
+        continue;
+      }
+
+      // Upload to B2
+      const safeTitle = slugifyText(listing.title || 'newsletter') || 'newsletter';
+      const fileName = safeTitle + '-' + pseudoMessage.gmailMessageId + '-retake.png';
+      const screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
+
+      // Update Listing.content with new screenshot URL
+      await listingCol.updateOne(
+        { _id: listing._id },
+        { $set: { content: screenshotUrl, screenshotRetakenAt: new Date() } }
+      );
+
+      // Also update linked EmailMessage if it exists
+      if (listing.messageId) {
+        await EmailMessage.updateOne(
+          { gmailMessageId: listing.messageId },
+          { $set: { screenshotPath: screenshotUrl } }
+        );
+      }
+
+      // Clean up temp file
+      if (screenshotPath && fs.existsSync(screenshotPath)) {
+        fs.unlinkSync(screenshotPath);
+      }
+
+      stats.retaken += 1;
+      if (stats.retaken % 10 === 0) {
+        logger.info('[retake_screenshots] Progress: ' + JSON.stringify(stats));
+      }
+    } catch (err) {
+      logger.warn('[retake_screenshots] ' + (listing._id) + ': ' + err.message);
+      stats.failed += 1;
+    }
+  }
+
+  logger.info('[retake_screenshots] Completed: ' + JSON.stringify(stats));
+  return stats;
+}
+
+
 module.exports = {
   ingestPendingNewsletters,
-  backfillListingsFromEmailMessages
+  backfillListingsFromEmailMessages,
+  retakeListingScreenshots
 };
