@@ -406,7 +406,7 @@ router.post('/agent/scan-emails', async (req, res) => {
 router.post('/agent/process-inbox', async (req, res) => {
   const run = await startWorkflowRun('scan_inbox', { body: req.body || {} });
   try {
-    const { hours = 24, maxResults = 100 } = req.body || {};
+    const { hours = 24, maxResults = 0 } = req.body || {};
     const result = await processInbox({ hours, maxResults });
     await completeWorkflowRun(run, 'success', result, null);
     res.json({ success: true, ...result });

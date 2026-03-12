@@ -6,6 +6,7 @@ const { processInbox, processInboxFullHistory } = require('../services/inboxProc
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
 const { ingestPendingNewsletters, backfillListingsFromEmailMessages, retakeListingScreenshots } = require('../services/newsletterIngestor');
 const { runLinkLegacyListingsToEmails } = require('./linkLegacyListingsToEmails');
+const { runScrubSensitiveContentBackfill } = require('./scrubSensitiveContentBackfill');
 
 async function runJob(job, options = {}) {
   switch (job) {
@@ -18,8 +19,8 @@ async function runJob(job, options = {}) {
       });
     case 'scan_inbox':
       return processInbox({
-        hours: Number(options.inboxHours || options.hours || process.env.SCAN_HOURS || 24),
-        maxResults: Number(options.maxInboxResults || options.maxResults || process.env.SCAN_MAX_RESULTS || 100)
+        hours: Number(options.inboxHours ?? options.hours ?? process.env.SCAN_HOURS ?? 24),
+        maxResults: Number(options.maxInboxResults ?? options.maxResults ?? process.env.SCAN_MAX_RESULTS ?? 0)
       });
     case 'scan_inbox_full_history':
       return processInboxFullHistory({
@@ -57,6 +58,14 @@ async function runJob(job, options = {}) {
         dryRun: String(options.dryRun ?? 'false') === 'true',
         skipAlreadyRetaken: String(options.skipAlreadyRetaken ?? 'true') === 'true'
       });
+    case 'scrub_sensitive_content':
+      return runScrubSensitiveContentBackfill({
+        dryRun: options.dryRun ?? process.env.SCRUB_SENSITIVE_DRY_RUN ?? 'false',
+        emailBatchSize: Number(options.emailBatchSize ?? process.env.SCRUB_SENSITIVE_EMAIL_BATCH_SIZE ?? 200),
+        listingBatchSize: Number(options.listingBatchSize ?? process.env.SCRUB_SENSITIVE_LISTING_BATCH_SIZE ?? 200),
+        emailLimit: Number(options.emailLimit ?? process.env.SCRUB_SENSITIVE_EMAIL_LIMIT ?? 0),
+        listingLimit: Number(options.listingLimit ?? process.env.SCRUB_SENSITIVE_LISTING_LIMIT ?? 0)
+      });
     default:
       throw new Error(`Unknown job: ${job}`);
   }
@@ -65,7 +74,7 @@ async function runJob(job, options = {}) {
 if (require.main === module) {
   const job = process.argv[2];
   if (!job) {
-    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings|link_legacy_listings_to_emails>');
+    console.error('Usage: node jobs/runJob.js <discover_and_signup|scan_inbox|scan_inbox_full_history|process_confirmations|ingest_newsletters|backfill_listings|link_legacy_listings_to_emails|scrub_sensitive_content>');
     process.exit(1);
   }
 

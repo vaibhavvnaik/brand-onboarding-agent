@@ -23,6 +23,7 @@ const PROMO_PATTERNS = [
 const DISCOUNT_PATTERN = /\b(\d{1,2}%\s*(?:off|OFF|discount|DISCOUNT))\b/;
 
 let b2Session = null;
+let cachedUrkUserId = null;
 
 function ensureOutputDir() {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -377,11 +378,7 @@ async function upsertUrkListing({ message, agentBrand, screenshotUrl }) {
   const db = mongoose.connection.db;
   const listingCol = db.collection('Listing');
   const urkBrandId = await resolveOrCreateUrkBrand({ message, agentBrand });
-  const userIdRaw = process.env.URKLIST_USER_ID;
-
-  if (!mongoose.Types.ObjectId.isValid(userIdRaw)) {
-    throw new Error('URKLIST_USER_ID missing or invalid');
-  }
+  const userId = await resolveUrkUserId(listingCol);
 
   const title = scrubSensitiveContent(message.subject || '(no subject)');
   const htmlContent = scrubSensitiveContent(message.bodyHtml || '') || null;
@@ -420,7 +417,7 @@ async function upsertUrkListing({ message, agentBrand, screenshotUrl }) {
         sourceEmailType: message.emailType || 'unknown',
         lastIngestedAt: now,
         brandId: urkBrandId,
-        userId: new mongoose.Types.ObjectId(userIdRaw),
+        userId,
         updatedAt: now
       },
       $setOnInsert: {
@@ -476,6 +473,34 @@ async function materializeListingForMessage({ message, brand, withScreenshots = 
   return {
     screenshotUrl: screenshotUrl || null
   };
+}
+
+async function resolveUrkUserId(listingCol) {
+  if (cachedUrkUserId && mongoose.Types.ObjectId.isValid(cachedUrkUserId)) {
+    return new mongoose.Types.ObjectId(cachedUrkUserId);
+  }
+
+  const envUserId = String(process.env.URKLIST_USER_ID || '').trim();
+  if (mongoose.Types.ObjectId.isValid(envUserId)) {
+    cachedUrkUserId = envUserId;
+    return new mongoose.Types.ObjectId(envUserId);
+  }
+
+  const fallbackDoc = await listingCol.findOne(
+    { userId: { $exists: true, $ne: null } },
+    {
+      projection: { userId: 1 },
+      sort: { updatedAt: -1, createdAt: -1 }
+    }
+  );
+  const fallbackUserId = String(fallbackDoc?.userId || '').trim();
+  if (mongoose.Types.ObjectId.isValid(fallbackUserId)) {
+    cachedUrkUserId = fallbackUserId;
+    logger.warn(`[ingest_newsletters] URKLIST_USER_ID missing/invalid; using fallback userId from existing Listing records: ${fallbackUserId}`);
+    return new mongoose.Types.ObjectId(fallbackUserId);
+  }
+
+  throw new Error('URKLIST_USER_ID missing or invalid and no fallback userId found in Listing collection');
 }
 
 async function markMessageIngestResult({ message, success, error = null, version = 'v2' }) {

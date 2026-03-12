@@ -36,7 +36,15 @@ async function run({ batchSize = 10, mode = 'full', onProgress = () => {}, getSt
 // -- Full pipeline ----------------------------------------------
 async function runFullOnboarding(batchSize, emit, getStopFlag) {
   const startTime = Date.now();
-  const stats = { discovered: 0, duplicatesSkipped: 0, signupSuccess: 0, signupFailed: 0, confirmed: 0, categorized: 0 };
+  const stats = {
+    discovered: 0,
+    duplicatesSkipped: 0,
+    signupSuccess: 0,
+    signupFailed: 0,
+    confirmed: 0,
+    categorized: 0,
+    runtimeReady: true
+  };
 
   emit('info', 'discovery', ` Phase 1: Discovering brands (target: ${batchSize})...`);
   const existingBrands  = await Brand.find({}, 'domain').lean();
@@ -94,9 +102,9 @@ async function runFullOnboarding(batchSize, emit, getStopFlag) {
 
   const runtime = await ensurePlaywrightRuntimeReady({ autoInstall: true });
   if (!runtime.ready) {
+    stats.runtimeReady = false;
     emit('error', 'signup', `[ERR] Runtime preflight failed before signup phase: ${runtime.reason || 'unknown reason'}`);
-    emit('warn', 'signup', 'Skipping signup phase for this run to avoid bulk environment failures.');
-    return stats;
+    throw new Error(`signup_runtime_preflight_failed: ${runtime.reason || 'unknown reason'}`);
   }
 
   for (let i = 0; i < toOnboard.length; i++) {

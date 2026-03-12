@@ -20,6 +20,7 @@ const helmet    = require('helmet');
 const cors      = require('cors');
 const rateLimit = require('express-rate-limit');
 const path      = require('path');
+const os        = require('os');
 
 const { connectDB } = require('./config/database');
 const { validateRequiredEnv } = require('./config/env');
@@ -40,13 +41,20 @@ let schedulerRunning = false;
 async function runStepWithTracking(step, options = {}) {
   const startedAt = new Date();
   let runRow = null;
+  const runtimeMeta = {
+    hostname: os.hostname(),
+    pid: process.pid,
+    serviceName: process.env.RAILWAY_SERVICE_NAME || null,
+    publicDomain: process.env.RAILWAY_PUBLIC_DOMAIN || null,
+    environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.NODE_ENV || null
+  };
   try {
     runRow = await WorkflowRun.create({
       step,
       trigger: 'scheduler',
       status: 'running',
       startedAt,
-      meta: { options }
+      meta: { options, runtime: runtimeMeta }
     });
   } catch {
     // non-fatal
@@ -82,7 +90,7 @@ function startInternalScheduler() {
   const options = {
     batchSize: Number(process.env.INTERNAL_CRON_BATCH_SIZE || process.env.BATCH_SIZE || 10),
     inboxHours: Number(process.env.INTERNAL_CRON_INBOX_HOURS || process.env.SCAN_HOURS || 24),
-    maxInboxResults: Number(process.env.INTERNAL_CRON_MAX_INBOX_RESULTS || process.env.SCAN_MAX_RESULTS || 100),
+    maxInboxResults: Number(process.env.INTERNAL_CRON_MAX_INBOX_RESULTS || process.env.SCAN_MAX_RESULTS || 0),
     limit: Number(process.env.INTERNAL_CRON_STEP_LIMIT || 50)
   };
 

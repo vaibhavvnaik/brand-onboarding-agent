@@ -81,7 +81,7 @@ Then call endpoints with API key:
 curl -X POST http://localhost:3000/api/agent/process-inbox \
   -H "x-api-key: $API_KEY" \
   -H "content-type: application/json" \
-  -d '{"hours":24,"maxResults":100}'
+  -d '{"hours":24,"maxResults":0}'
 
 curl -X POST http://localhost:3000/api/agent/process-confirmations \
   -H "x-api-key: $API_KEY" \
@@ -96,7 +96,7 @@ curl -X POST http://localhost:3000/api/agent/ingest-newsletters \
 curl -X POST http://localhost:3000/api/agent/run-simplified-cycle \
   -H "x-api-key: $API_KEY" \
   -H "content-type: application/json" \
-  -d '{"batchSize":10,"inboxHours":24,"maxInboxResults":100}'
+  -d '{"batchSize":10,"inboxHours":24,"maxInboxResults":0}'
 ```
 
 ## 5) DB verification queries (Mongo shell)

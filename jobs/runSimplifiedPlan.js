@@ -6,8 +6,8 @@ const { runJob } = require('./runJob');
 async function runSimplifiedPlan(options = {}) {
   const normalizedOptions = {
     ...options,
-    hours: Number(options.inboxHours || options.hours || process.env.SCAN_HOURS || 24),
-    maxResults: Number(options.maxInboxResults || options.maxResults || process.env.SCAN_MAX_RESULTS || 100)
+    hours: Number(options.inboxHours ?? options.hours ?? process.env.SCAN_HOURS ?? 24),
+    maxResults: Number(options.maxInboxResults ?? options.maxResults ?? process.env.SCAN_MAX_RESULTS ?? 0)
   };
   const result = {
     startedAt: new Date().toISOString(),

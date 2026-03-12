@@ -758,12 +758,19 @@ async function loadWorkflowRuns() {
             ${stepRuns.map((row) => {
               const sum = row.summary || {};
               const stats = [];
+              if (typeof sum.discovered === 'number') stats.push(`discovered: ${sum.discovered}`);
+              if (typeof sum.categorized === 'number') stats.push(`categorized: ${sum.categorized}`);
               if (typeof sum.processed === 'number') stats.push(`processed: ${sum.processed}`);
+              if (typeof sum.fetched === 'number') stats.push(`fetched: ${sum.fetched}`);
               if (typeof sum.matched === 'number') stats.push(`matched: ${sum.matched}`);
+              if (typeof sum.scanned === 'number') stats.push(`scanned: ${sum.scanned}`);
               if (typeof sum.ingested === 'number') stats.push(`ingested: ${sum.ingested}`);
+              if (typeof sum.skipped === 'number') stats.push(`skipped: ${sum.skipped}`);
+              if (typeof sum.failed === 'number') stats.push(`failed: ${sum.failed}`);
               if (typeof sum.confirmed === 'number') stats.push(`confirmed: ${sum.confirmed}`);
               if (typeof sum.signupSuccess === 'number') stats.push(`signup ok: ${sum.signupSuccess}`);
               if (typeof sum.signupFailed === 'number') stats.push(`signup failed: ${sum.signupFailed}`);
+              if (sum.runtimeReady === false) stats.push('runtime: not_ready');
               const statusColor = row.status === 'success' ? 'text-emerald-300' : row.status === 'failed' ? 'text-red-300' : 'text-amber-300';
               return `
                 <tr>
