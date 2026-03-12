@@ -121,10 +121,11 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
       });
     });
 
-    // Take a viewport-sized screenshot (not fullPage) so the image
-    // is exactly viewportWidth x viewportHeight (600x1200 by default).
-    // This avoids super-tall images that look tiny in listing tiles.
-    // Wait for all images to finish loading so the screenshot captures
+    // CSS injection causes reflow which may trigger new network requests
+    // (e.g. newly-visible images, background images). Wait for network to settle again.
+    await page.waitForLoadState('networkidle').catch(() => {});
+
+    // Wait for all <img> elements to finish loading so the screenshot captures
     // the fully-rendered newsletter, not a partially-loaded blank page.
     await page.evaluate(() => {
       return Promise.all(
@@ -139,8 +140,41 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
       );
     });
 
-    // Small stabilization delay for any CSS reflows after images load.
-    await page.waitForTimeout(500);
+    // Wait for CSS background images to load (many newsletters use background-image for hero banners)
+    await page.evaluate(() => {
+      const bgElements = [];
+      const allElements = document.querySelectorAll('*');
+      for (let i = 0; i < allElements.length; i++) {
+        const style = window.getComputedStyle(allElements[i]);
+        const bgImage = style.backgroundImage;
+        if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
+          const urlMatch = bgImage.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/);
+          if (urlMatch) bgElements.push(urlMatch[1]);
+        }
+      }
+      if (bgElements.length === 0) return Promise.resolve();
+      return Promise.all(bgElements.map(url => {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = resolve;
+          img.onerror = resolve;
+          setTimeout(resolve, 8000);
+          img.src = url;
+        });
+      }));
+    });
+
+    // Wait for web fonts to finish loading (prevents fallback font flash)
+    await page.evaluate(() => {
+      if (document.fonts && document.fonts.ready) {
+        return document.fonts.ready;
+      }
+      return Promise.resolve();
+    }).catch(() => {});
+
+    // Stabilization delay for CSS reflows, font swaps, and late-rendering content.
+    // 500ms was too short — some newsletters need time for final paint.
+    await page.waitForTimeout(2000);
 
     await page.screenshot({ path: filePath });
     return filePath;
