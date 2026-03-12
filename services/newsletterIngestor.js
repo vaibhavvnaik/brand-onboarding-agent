@@ -174,8 +174,8 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
     }).catch(() => {});
 
     // Stabilization delay for CSS reflows, font swaps, and late-rendering content.
-    // 500ms was too short — some newsletters need time for final paint.
-    await page.waitForTimeout(2000);
+    // 2000ms was still too short for many newsletters — increase to 5000ms.
+    await page.waitForTimeout(5000);
 
     await page.screenshot({ path: filePath });
     return filePath;
