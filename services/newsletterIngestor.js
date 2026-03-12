@@ -94,7 +94,7 @@ function defaultScreenshotUserAgent() {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 }
 
-async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
+async function screenshotEmailMessage(message, { sharedBrowser, options = {} } = {}) {
   ensureOutputDir();
   const safeId = String(message.gmailMessageId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
   const filePath = path.join(OUTPUT_DIR, `${safeId}.png`);
@@ -106,13 +106,36 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
   const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 600);
   const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 1200);
-  const stabilizeMs = readNumberEnv('NEWSLETTER_SCREENSHOT_STABILIZE_MS', 6000);
-  const retryStabilizeMs = readNumberEnv('NEWSLETTER_SCREENSHOT_RETRY_STABILIZE_MS', 5000);
-  const maxImgWaitMs = readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_IMAGE_WAIT_MS', 12000);
-  const maxCaptureHeight = readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_CAPTURE_HEIGHT', 2200);
-  const forceWidthRewrite = readBoolEnv('NEWSLETTER_SCREENSHOT_FORCE_WIDTH_REWRITE', false);
-  const minImageLoadRatio = Number(process.env.NEWSLETTER_SCREENSHOT_MIN_IMAGE_LOAD_RATIO || 0.35);
-  const maxQualityPasses = Math.max(1, readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_QUALITY_PASSES', 2));
+  const stabilizeMs = Number.isFinite(Number(options.stabilizeMs))
+    ? Number(options.stabilizeMs)
+    : readNumberEnv('NEWSLETTER_SCREENSHOT_STABILIZE_MS', 6000);
+  const retryStabilizeMs = Number.isFinite(Number(options.retryStabilizeMs))
+    ? Number(options.retryStabilizeMs)
+    : readNumberEnv('NEWSLETTER_SCREENSHOT_RETRY_STABILIZE_MS', 5000);
+  const maxImgWaitMs = Number.isFinite(Number(options.maxImgWaitMs))
+    ? Number(options.maxImgWaitMs)
+    : readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_IMAGE_WAIT_MS', 12000);
+  const maxCaptureHeight = Number.isFinite(Number(options.maxCaptureHeight))
+    ? Number(options.maxCaptureHeight)
+    : readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_CAPTURE_HEIGHT', 2200);
+  const forceWidthRewrite = typeof options.forceWidthRewrite === 'boolean'
+    ? options.forceWidthRewrite
+    : readBoolEnv('NEWSLETTER_SCREENSHOT_FORCE_WIDTH_REWRITE', false);
+  const minImageLoadRatio = Number.isFinite(Number(options.minImageLoadRatio))
+    ? Number(options.minImageLoadRatio)
+    : Number(process.env.NEWSLETTER_SCREENSHOT_MIN_IMAGE_LOAD_RATIO || 0.35);
+  const maxQualityPasses = Math.max(
+    1,
+    Number.isFinite(Number(options.maxQualityPasses))
+      ? Number(options.maxQualityPasses)
+      : readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_QUALITY_PASSES', 2)
+  );
+  const minMeaningfulBottom = Number.isFinite(Number(options.minMeaningfulBottom))
+    ? Number(options.minMeaningfulBottom)
+    : readNumberEnv('NEWSLETTER_SCREENSHOT_MIN_MEANINGFUL_BOTTOM', 300);
+  const strictQualityGate = typeof options.strictQualityGate === 'boolean'
+    ? options.strictQualityGate
+    : readBoolEnv('NEWSLETTER_SCREENSHOT_STRICT_QUALITY_GATE', true);
   const ownBrowser = !sharedBrowser;
   const browser = sharedBrowser || await chromium.launch({
     headless: true,
@@ -252,6 +275,8 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
         const imgs = Array.from(document.querySelectorAll('img'));
         const loaded = imgs.filter((img) => img.complete && img.naturalWidth > 0).length;
         let maxBottom = 0;
+        let textChars = 0;
+        let meaningfulNodes = 0;
         const nodes = Array.from(document.querySelectorAll('body *'));
         for (const node of nodes) {
           const rect = node.getBoundingClientRect();
@@ -261,6 +286,10 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
           const hasMedia = node.tagName === 'IMG';
           if (hasText || hasMedia) {
             maxBottom = Math.max(maxBottom, node.offsetTop + rect.height);
+            meaningfulNodes += 1;
+          }
+          if (text.length > 0) {
+            textChars += Math.min(text.length, 300);
           }
         }
         const body = document.body;
@@ -275,7 +304,9 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
           imgTotal: imgs.length,
           imgLoaded: loaded,
           scrollHeight,
-          meaningfulBottom: Math.ceil(maxBottom)
+          meaningfulBottom: Math.ceil(maxBottom),
+          meaningfulNodes,
+          textChars
         };
       });
 
@@ -292,6 +323,21 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
 
     if (quality?.imgTotal >= 8 && imgRatio < minImageLoadRatio) {
       logger.warn(`[screenshot] Low image-load ratio for ${message.gmailMessageId}: loaded=${quality.imgLoaded}/${quality.imgTotal}`);
+    }
+
+    const likelyFooterOnly = (quality?.meaningfulBottom || 0) < minMeaningfulBottom && (quality?.scrollHeight || 0) > 700;
+    const likelyEmpty = (quality?.meaningfulNodes || 0) <= 4 && (quality?.textChars || 0) < 90 && (quality?.imgLoaded || 0) === 0 && (quality?.scrollHeight || 0) > 600;
+    const likelyImageStarved = (quality?.imgTotal || 0) >= 6 && imgRatio < minImageLoadRatio;
+
+    if (strictQualityGate && (likelyFooterOnly || likelyEmpty || likelyImageStarved)) {
+      const reason = [
+        likelyFooterOnly ? 'footer_only' : null,
+        likelyEmpty ? 'empty' : null,
+        likelyImageStarved ? 'image_starved' : null
+      ].filter(Boolean).join('+');
+      throw new Error(
+        `screenshot_quality_gate_failed:${reason}:loaded=${quality?.imgLoaded || 0}/${quality?.imgTotal || 0}:meaningfulBottom=${quality?.meaningfulBottom || 0}:textChars=${quality?.textChars || 0}`
+      );
     }
 
     const desiredHeight = Math.min(
@@ -589,34 +635,50 @@ async function materializeListingForMessage({ message, brand, withScreenshots = 
   // If B2 is not configured, skip screenshot generation in automated runs.
   const b2Enabled = canUseB2();
   if (withScreenshots && !screenshotUrl && b2Enabled) {
-    try {
-      screenshotPath = await screenshotEmailMessage(message);
-      if (screenshotPath) {
-        const fileName = buildVersionedScreenshotFileName({
-          subject: message.subject || 'newsletter',
-          messageId: message.gmailMessageId
+    const maxAttempts = Math.max(1, readNumberEnv('NEWSLETTER_SCREENSHOT_INGEST_MAX_ATTEMPTS', 3));
+    for (let attempt = 1; attempt <= maxAttempts && !screenshotUrl; attempt += 1) {
+      try {
+        screenshotPath = await screenshotEmailMessage(message, {
+          options: {
+            strictQualityGate: true,
+            // Give retries more time and optional width rewrite fallback on final attempt.
+            stabilizeMs: attempt === 1 ? undefined : 9000,
+            retryStabilizeMs: attempt === 1 ? undefined : 7000,
+            maxQualityPasses: attempt === 1 ? undefined : 3,
+            forceWidthRewrite: attempt >= 3 ? true : undefined
+          }
         });
-        screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
-        if (screenshotUrl) {
-          await markEmailActivity({
-            gmailMessageId: message.gmailMessageId,
-            activity: 'screenshot_captured',
-            emailMessage: message
+        if (screenshotPath) {
+          const fileName = buildVersionedScreenshotFileName({
+            subject: message.subject || 'newsletter',
+            messageId: message.gmailMessageId
           });
+          screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
+          if (screenshotUrl) {
+            await markEmailActivity({
+              gmailMessageId: message.gmailMessageId,
+              activity: 'screenshot_captured',
+              emailMessage: message
+            });
+          }
+        }
+      } catch (screenshotErr) {
+        logger.warn(`[${context}] screenshot attempt ${attempt}/${maxAttempts} failed for ${message.gmailMessageId}: ${screenshotErr.message}`);
+        if (attempt >= maxAttempts) {
+          logger.warn(`[${context}] screenshot/upload skipped for ${message.gmailMessageId}: ${screenshotErr.message}`);
+        }
+      } finally {
+        if (screenshotPath && fs.existsSync(screenshotPath)) {
+          fs.unlinkSync(screenshotPath);
+          screenshotPath = null;
         }
       }
-    } catch (screenshotErr) {
-      logger.warn(`[${context}] screenshot/upload skipped for ${message.gmailMessageId}: ${screenshotErr.message}`);
     }
   } else if (withScreenshots && !b2Enabled) {
     logger.warn(`[${context}] B2 not configured; skipping screenshot generation for ${message.gmailMessageId}`);
   }
 
   await upsertUrkListing({ message, agentBrand: brand, screenshotUrl });
-
-  if (screenshotPath && fs.existsSync(screenshotPath)) {
-    fs.unlinkSync(screenshotPath);
-  }
 
   return {
     screenshotUrl: screenshotUrl || null
@@ -1125,19 +1187,42 @@ async function retakeListingScreenshots({
         gmailMessageId: listing.messageId || String(listing._id)
       };
 
-      const screenshotPath = await screenshotEmailMessage(pseudoMessage, { sharedBrowser });
-      if (!screenshotPath) {
-        stats.skippedNoHtml += 1;
-        continue;
+      const maxAttempts = Math.max(1, readNumberEnv('NEWSLETTER_SCREENSHOT_RETAKE_MAX_ATTEMPTS', 3));
+      let screenshotUrl = null;
+      let screenshotPath = null;
+      for (let attempt = 1; attempt <= maxAttempts && !screenshotUrl; attempt += 1) {
+        try {
+          screenshotPath = await screenshotEmailMessage(pseudoMessage, {
+            sharedBrowser,
+            options: {
+              strictQualityGate: true,
+              stabilizeMs: attempt === 1 ? undefined : 9000,
+              retryStabilizeMs: attempt === 1 ? undefined : 7000,
+              maxQualityPasses: attempt === 1 ? undefined : 3,
+              forceWidthRewrite: attempt >= 3 ? true : undefined
+            }
+          });
+          if (!screenshotPath) continue;
+          const fileName = buildVersionedScreenshotFileName({
+            subject: listing.title || 'newsletter',
+            messageId: pseudoMessage.gmailMessageId,
+            suffix: 'retake'
+          });
+          screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
+        } catch (attemptErr) {
+          logger.warn('[retake_screenshots] attempt ' + attempt + '/' + maxAttempts + ' failed for ' + (listing._id) + ': ' + attemptErr.message);
+        } finally {
+          if (screenshotPath && fs.existsSync(screenshotPath)) {
+            fs.unlinkSync(screenshotPath);
+          }
+          screenshotPath = null;
+        }
       }
 
-      // Upload to B2
-      const fileName = buildVersionedScreenshotFileName({
-        subject: listing.title || 'newsletter',
-        messageId: pseudoMessage.gmailMessageId,
-        suffix: 'retake'
-      });
-      const screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
+      if (!screenshotUrl) {
+        stats.failed += 1;
+        continue;
+      }
 
       // Update Listing.content with new screenshot URL
       await listingCol.updateOne(
@@ -1155,11 +1240,6 @@ async function retakeListingScreenshots({
           gmailMessageId: listing.messageId,
           activity: 'screenshot_captured'
         });
-      }
-
-      // Clean up temp file
-      if (screenshotPath && fs.existsSync(screenshotPath)) {
-        fs.unlinkSync(screenshotPath);
       }
 
       stats.retaken += 1;
