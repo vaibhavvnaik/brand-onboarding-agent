@@ -7,7 +7,9 @@ const { chromium } = require('playwright');
 const Brand = require('../models/Brand');
 const EmailMessage = require('../models/EmailMessage');
 const logger = require('../utils/logger');
+const { markEmailActivity } = require('./gmailStatusLabels');
 const { normalizeDomain, getRegistrableDomain } = require('../utils/domainIdentity');
+const { scrubSensitiveContent } = require('../utils/contentScrubber');
 
 const OUTPUT_DIR = path.join(__dirname, '../artifacts/newsletters');
 const DEFAULT_CATEGORY_NAME = 'Uncategorized';
@@ -80,8 +82,8 @@ async function screenshotEmailMessage(message) {
   const filePath = path.join(OUTPUT_DIR, `${safeId}.png`);
 
   const html = message.bodyHtml
-    ? message.bodyHtml
-    : `<html><body><pre style="white-space:pre-wrap;font-family:Arial,sans-serif;">${message.bodyText || message.textBody || message.snippet || ''}</pre></body></html>`;
+    ? scrubSensitiveContent(message.bodyHtml)
+    : `<html><body><pre style="white-space:pre-wrap;font-family:Arial,sans-serif;">${scrubSensitiveContent(message.bodyText || message.textBody || message.snippet || '')}</pre></body></html>`;
 
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
   const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 600);
@@ -326,9 +328,9 @@ async function upsertUrkListing({ message, agentBrand, screenshotUrl }) {
     throw new Error('URKLIST_USER_ID missing or invalid');
   }
 
-  const title = message.subject || '(no subject)';
-  const htmlContent = message.bodyHtml || null;
-  const bodyText = message.bodyText || message.textBody || message.snippet || '';
+  const title = scrubSensitiveContent(message.subject || '(no subject)');
+  const htmlContent = scrubSensitiveContent(message.bodyHtml || '') || null;
+  const bodyText = scrubSensitiveContent(message.bodyText || message.textBody || message.snippet || '');
   const nextPromoCodes = extractPromoCodes(title, `${htmlContent || ''}\n${bodyText}`);
   const nextDiscountText = extractDiscountText(title);
   const now = new Date();
@@ -395,6 +397,13 @@ async function materializeListingForMessage({ message, brand, withScreenshots = 
       if (screenshotPath) {
         const fileName = `${slugifyText(message.subject || 'newsletter') || 'newsletter'}-${message.gmailMessageId}.png`;
         screenshotUrl = await uploadScreenshotToB2(screenshotPath, fileName);
+        if (screenshotUrl) {
+          await markEmailActivity({
+            gmailMessageId: message.gmailMessageId,
+            activity: 'screenshot_captured',
+            emailMessage: message
+          });
+        }
       }
     } catch (screenshotErr) {
       logger.warn(`[${context}] screenshot/upload skipped for ${message.gmailMessageId}: ${screenshotErr.message}`);
@@ -486,6 +495,11 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
       };
       message.needsReview = true;
       await message.save();
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'ingestion_skipped',
+        emailMessage: message
+      });
       stats.skipped += 1;
       continue;
     }
@@ -503,6 +517,11 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
       };
       message.needsReview = true;
       await message.save();
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'error',
+        emailMessage: message
+      });
       stats.failed += 1;
       continue;
     }
@@ -517,6 +536,11 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
       message.screenshotPath = materialized.screenshotUrl;
       await markMessageIngestResult({ message, success: true, version: 'v2' });
       await message.save();
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'ingested',
+        emailMessage: message
+      });
 
       if (message.emailType === 'newsletter') {
         if (!brand.firstNewsletterAt) brand.firstNewsletterAt = message.receivedAt || new Date();
@@ -529,6 +553,11 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
       logger.warn(`[ingest_newsletters] ${message.gmailMessageId}: ${err.message}`);
       await markMessageIngestResult({ message, success: false, error: err.message, version: 'v2' });
       await message.save();
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'error',
+        emailMessage: message
+      });
       stats.failed += 1;
     }
   }
@@ -606,6 +635,11 @@ async function backfillListingsFromEmailMessages({
       message.screenshotPath = materialized.screenshotUrl || message.screenshotPath || null;
       await markMessageIngestResult({ message, success: true, version: 'v2' });
       await message.save();
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'ingested',
+        emailMessage: message
+      });
 
       if (message.emailType === 'newsletter') {
         if (!brand.firstNewsletterAt) brand.firstNewsletterAt = message.receivedAt || new Date();
@@ -616,6 +650,11 @@ async function backfillListingsFromEmailMessages({
       stats.backfilled += 1;
     } catch (err) {
       logger.warn(`[backfill_listings] ${message.gmailMessageId}: ${err.message}`);
+      await markEmailActivity({
+        gmailMessageId: message.gmailMessageId,
+        activity: 'error',
+        emailMessage: message
+      });
       stats.failed += 1;
     }
   }

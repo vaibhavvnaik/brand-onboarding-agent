@@ -1,8 +1,8 @@
 const Brand = require('../models/Brand');
 const EmailMessage = require('../models/EmailMessage');
+const Config = require('../models/Config');
 const axios = require('axios');
 const {
-  searchMessages,
   getGmailClient,
   gmailCall,
   getMessage,
@@ -17,12 +17,19 @@ const {
   domainsRelated,
   extractDomainFromUrl
 } = require('../utils/domainIdentity');
+const { scrubSensitiveContent, scrubSensitiveContentDeep } = require('../utils/contentScrubber');
+const { markEmailActivity } = require('./gmailStatusLabels');
 const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const BRAND_MATCH_CONFIDENCE_THRESHOLD = Math.max(
   0,
   Number(process.env.BRAND_MATCH_CONFIDENCE_THRESHOLD || 9)
+);
+const SCAN_CURSOR_CONFIG_KEY = 'scan_inbox_cursor_v1';
+const SCAN_CURSOR_OVERLAP_SECONDS = Math.max(
+  60,
+  Number(process.env.SCAN_CURSOR_OVERLAP_SECONDS || 300)
 );
 
 function escapeRegex(input) {
@@ -325,7 +332,19 @@ async function markUnresolvedForManualReview({
     matchSource,
     matchConfidence
   });
-  return { matched: false, emailType, manualReview: true };
+  await markEmailActivity({
+    gmailMessageId: emailMessage.gmailMessageId,
+    activity: 'processed',
+    parsed,
+    emailMessage
+  });
+  return {
+    matched: false,
+    emailType,
+    manualReview: true,
+    gmailMessageId: emailMessage.gmailMessageId,
+    receivedAt: emailMessage.receivedAt || null
+  };
 }
 
 function inferNewsletterLikeType(parsed, detectedType, brand) {
@@ -526,6 +545,21 @@ async function resolveBrand(senderEmail, senderDomain, links = []) {
 }
 
 async function upsertEmailMessage(parsed) {
+  const safeFrom = scrubSensitiveContent(parsed.from || '');
+  const safeTo = scrubSensitiveContent(parsed.to || '');
+  const safeSubject = scrubSensitiveContent(parsed.subject || '');
+  const safeSnippet = scrubSensitiveContent(parsed.snippet || '');
+  const safeBodyText = scrubSensitiveContent(parsed.bodyText || '');
+  const safeBodyHtml = scrubSensitiveContent(parsed.bodyHtml || '');
+  const safeHeaders = {
+    ...(scrubSensitiveContentDeep(parsed.rawHeaders || {})),
+    messageId: parsed.messageId || null,
+    from: safeFrom,
+    to: safeTo,
+    subject: safeSubject,
+    date: scrubSensitiveContent(parsed.date || '')
+  };
+
   const senderEmail = extractSenderEmail(parsed.from);
   const senderDomain = normalizeDomain(extractDomainFromEmail(senderEmail));
   const senderApexDomain = getRegistrableDomain(senderDomain || '') || senderDomain || '';
@@ -535,14 +569,6 @@ async function upsertEmailMessage(parsed) {
   const emailType = classifyEmailType(parsed.subject, parsed.bodyText, parsed.bodyHtml);
   const linkSnapshots = await buildLinkSnapshots(parsed.links || []);
   const receivedAt = parsed.internalDate ? new Date(Number(parsed.internalDate)) : new Date();
-  const headers = {
-    ...(parsed.rawHeaders || {}),
-    messageId: parsed.messageId || null,
-    from: parsed.from || '',
-    to: parsed.to || '',
-    subject: parsed.subject || '',
-    date: parsed.date || ''
-  };
 
   const emailMessage = await EmailMessage.findOneAndUpdate(
     { gmailMessageId: parsed.id },
@@ -552,14 +578,14 @@ async function upsertEmailMessage(parsed) {
         gmailLabelIds: parsed.labelIds || [],
         gmailSizeEstimate: parsed.sizeEstimate || 0,
         threadId: parsed.threadId,
-        from: parsed.from,
+        from: safeFrom,
         fromEmail: senderEmail,
         fromDomain: senderDomain,
         senderApexDomain,
         senderSubdomain,
-        to: parsed.to,
-        subject: parsed.subject,
-        snippet: parsed.snippet,
+        to: safeTo,
+        subject: safeSubject,
+        snippet: safeSnippet,
         receivedAt,
         rfc822MessageId: parsed.messageId || null,
         listUnsubscribe: parsed.listUnsubscribe || null,
@@ -574,11 +600,11 @@ async function upsertEmailMessage(parsed) {
         espHeaders: parsed.espHeaders || {},
         attachmentMetadata: parsed.attachments || [],
         mimeMeta: parsed.mimeMeta || {},
-        textBody: parsed.bodyText,
-        htmlBody: parsed.bodyHtml,
-        bodyText: parsed.bodyText,
-        bodyHtml: parsed.bodyHtml,
-        headers,
+        textBody: safeBodyText,
+        htmlBody: safeBodyHtml,
+        bodyText: safeBodyText,
+        bodyHtml: safeBodyHtml,
+        headers: safeHeaders,
         links: parsed.links || [],
         linkSnapshots,
         emailType,
@@ -601,6 +627,13 @@ async function upsertEmailMessage(parsed) {
     { upsert: true, new: true }
   );
 
+  await markEmailActivity({
+    gmailMessageId: parsed.id,
+    activity: 'metadata_stored',
+    parsed,
+    emailMessage
+  });
+
   return { emailMessage, senderEmail, senderDomain, emailType };
 }
 
@@ -620,7 +653,7 @@ async function processSingleMessage(messageId) {
       candidateBrand = inferred.brand;
       matchSource = inferred.source || 'content_reference';
       matchConfidence = inferred.confidence || 0;
-      logger.info(`[scan_inbox] Content-based brand candidate: "${parsed.subject || ''}" -> ${candidateBrand.name} (${matchSource}, confidence=${matchConfidence})`);
+      logger.info(`[scan_inbox] Content-based brand candidate: "${scrubSensitiveContent(parsed.subject || '')}" -> ${candidateBrand.name} (${matchSource}, confidence=${matchConfidence})`);
       if (matchConfidence >= BRAND_MATCH_CONFIDENCE_THRESHOLD) {
         brand = candidateBrand;
       } else {
@@ -773,19 +806,81 @@ async function processSingleMessage(messageId) {
   }
 
   await emailMessage.save();
-  return { matched: true, emailType: effectiveEmailType, brandId: String(brand._id) };
+  await markEmailActivity({
+    gmailMessageId: emailMessage.gmailMessageId,
+    activity: 'processed',
+    parsed,
+    emailMessage
+  });
+  return {
+    matched: true,
+    emailType: effectiveEmailType,
+    brandId: String(brand._id),
+    gmailMessageId: emailMessage.gmailMessageId,
+    receivedAt: emailMessage.receivedAt || null
+  };
 }
 
-async function processInbox({ hours = 24, maxResults = 100 } = {}) {
-  const since = Math.floor((Date.now() - hours * 3600 * 1000) / 1000);
+async function processInbox({ hours = 24, maxResults = 0 } = {}) {
+  const gmail = await getGmailClient();
+  const cursor = await loadScanCursor();
+  const pageSize = Math.max(1, Math.min(500, Number(process.env.SCAN_PAGE_SIZE || 500)));
+  const cap = Math.max(0, Number(maxResults) || 0);
+  const fallbackSince = Math.floor((Date.now() - hours * 3600 * 1000) / 1000);
+  const since = cursor?.lastCommittedInternalTs
+    ? Math.max(0, Math.floor(cursor.lastCommittedInternalTs / 1000) - SCAN_CURSOR_OVERLAP_SECONDS)
+    : fallbackSince;
   // Do not require explicit `to:` match; many newsletter ESPs use list aliases/BCC.
   const query = `after:${since} in:inbox`;
 
   logger.info(`[scan_inbox] Querying Gmail: ${query}`);
-  const refs = await searchMessages(query, maxResults);
+  const stats = buildScanStats(0);
+  stats.cursor = cursor;
 
-  const stats = buildScanStats(refs.length);
-  await processMessageRefs(refs, stats, 'scan_inbox');
+  let pageToken = null;
+  let fetchedTotal = 0;
+
+  do {
+    if (cap > 0 && fetchedTotal >= cap) {
+      stats.truncated = true;
+      break;
+    }
+
+    const remaining = cap > 0 ? cap - fetchedTotal : pageSize;
+    const currentMax = cap > 0 ? Math.min(pageSize, remaining) : pageSize;
+    if (currentMax <= 0) break;
+
+    const res = await gmailCall(
+      () => gmail.users.messages.list({
+        userId: 'me',
+        q: query,
+        maxResults: currentMax,
+        pageToken: pageToken || undefined
+      }),
+      { label: 'users.messages.list.scan_inbox' }
+    );
+
+    const refs = res.data?.messages || [];
+    stats.pages += 1;
+    stats.fetched += refs.length;
+    fetchedTotal += refs.length;
+
+    if (!refs.length) break;
+    await processMessageRefs(refs, stats, 'scan_inbox');
+    pageToken = res.data?.nextPageToken || null;
+  } while (pageToken);
+
+  if (stats.truncated) {
+    stats.cursorCommitted = false;
+    stats.cursorReason = 'cursor_not_committed_scan_truncated';
+  } else if (stats.failed > 0) {
+    stats.cursorCommitted = false;
+    stats.cursorReason = 'cursor_not_committed_processing_failures_present';
+  } else {
+    const committed = await commitScanCursor(stats.cursorCandidate, stats);
+    stats.cursorCommitted = !!committed;
+    stats.cursor = committed || stats.cursor;
+  }
 
   logger.info(`[scan_inbox] Completed: ${JSON.stringify(stats)}`);
   return stats;
@@ -796,7 +891,14 @@ function buildScanStats(fetched = 0) {
     fetched,
     pages: 0,
     processed: 0,
+    failed: 0,
+    truncated: false,
+    cursorCommitted: false,
+    cursorReason: null,
+    cursorCandidate: null,
+    cursor: null,
     skippedAlreadyFinalized: 0,
+    skippedAlreadyResolved: 0,
     matched: 0,
     unmatched: 0,
     byType: {
@@ -810,6 +912,89 @@ function buildScanStats(fetched = 0) {
   };
 }
 
+function normalizeCursor(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  const ts = Number(value.lastCommittedInternalTs || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  return {
+    version: Number(value.version || 1),
+    lastCommittedInternalTs: ts,
+    lastCommittedAt: value.lastCommittedAt ? new Date(value.lastCommittedAt).toISOString() : null,
+    lastCommittedGmailMessageId: value.lastCommittedGmailMessageId ? String(value.lastCommittedGmailMessageId) : null
+  };
+}
+
+async function loadScanCursor() {
+  try {
+    const stored = await Config.get(SCAN_CURSOR_CONFIG_KEY);
+    return normalizeCursor(stored);
+  } catch (err) {
+    logger.warn(`[scan_inbox] Failed to load cursor: ${err.message}`);
+    return null;
+  }
+}
+
+function buildCursorCandidate(receivedAt, gmailMessageId) {
+  if (!receivedAt) return null;
+  const ts = new Date(receivedAt).getTime();
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  return {
+    ts,
+    gmailMessageId: String(gmailMessageId || '')
+  };
+}
+
+function isCandidateNewer(a, b) {
+  if (!a) return false;
+  if (!b) return true;
+  if (a.ts !== b.ts) return a.ts > b.ts;
+  return String(a.gmailMessageId || '') > String(b.gmailMessageId || '');
+}
+
+function rememberCursorCandidate(stats, receivedAt, gmailMessageId) {
+  const candidate = buildCursorCandidate(receivedAt, gmailMessageId);
+  if (!candidate) return;
+  if (isCandidateNewer(candidate, stats.cursorCandidate)) {
+    stats.cursorCandidate = candidate;
+  }
+}
+
+async function commitScanCursor(candidate, stats) {
+  if (!candidate) {
+    stats.cursorReason = 'no_cursor_candidate';
+    return null;
+  }
+
+  try {
+    const existing = await loadScanCursor();
+    const existingCandidate = existing
+      ? {
+          ts: Number(existing.lastCommittedInternalTs || 0),
+          gmailMessageId: String(existing.lastCommittedGmailMessageId || '')
+        }
+      : null;
+
+    if (!isCandidateNewer(candidate, existingCandidate)) {
+      stats.cursorReason = 'cursor_already_newer_or_equal';
+      return existing;
+    }
+
+    const nextCursor = {
+      version: 1,
+      lastCommittedInternalTs: candidate.ts,
+      lastCommittedAt: new Date().toISOString(),
+      lastCommittedGmailMessageId: candidate.gmailMessageId || null
+    };
+    await Config.set(SCAN_CURSOR_CONFIG_KEY, nextCursor);
+    stats.cursorReason = 'cursor_committed';
+    return nextCursor;
+  } catch (err) {
+    logger.warn(`[scan_inbox] Failed to commit cursor: ${err.message}`);
+    stats.cursorReason = `cursor_commit_failed: ${err.message}`;
+    return null;
+  }
+}
+
 async function processMessageRefs(refs, stats, logPrefix) {
   let loopCount = 0;
   const startedAt = Date.now();
@@ -817,7 +1002,7 @@ async function processMessageRefs(refs, stats, logPrefix) {
     loopCount += 1;
     try {
       const existing = await EmailMessage.findOne({ gmailMessageId: ref.id })
-        .select('processedBy state ingestedAt')
+        .select('processedBy state ingestedAt receivedAt gmailMessageId')
         .lean();
       if (
         existing?.processedBy?.confirmation_runner?.done &&
@@ -827,10 +1012,20 @@ async function processMessageRefs(refs, stats, logPrefix) {
         )
       ) {
         stats.skippedAlreadyFinalized += 1;
+        rememberCursorCandidate(stats, existing?.receivedAt, existing?.gmailMessageId || ref.id);
+        continue;
+      }
+      if (
+        existing?.processedBy?.identity_resolver?.done &&
+        ['brand_resolved', 'confirmation_processed', 'ingested', 'finalized'].includes(String(existing?.state || ''))
+      ) {
+        stats.skippedAlreadyResolved += 1;
+        rememberCursorCandidate(stats, existing?.receivedAt, existing?.gmailMessageId || ref.id);
         continue;
       }
       const result = await processSingleMessage(ref.id);
       stats.processed += 1;
+      rememberCursorCandidate(stats, result?.receivedAt, result?.gmailMessageId || ref.id);
       if (result.matched) stats.matched += 1;
       else stats.unmatched += 1;
       stats.byType[result.emailType] = (stats.byType[result.emailType] || 0) + 1;
@@ -840,6 +1035,7 @@ async function processMessageRefs(refs, stats, logPrefix) {
       }
       await sleep(120);
     } catch (err) {
+      stats.failed += 1;
       logger.warn(`[${logPrefix}] Failed to process message ${ref.id}: ${err.message}`);
     }
   }

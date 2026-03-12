@@ -67,6 +67,7 @@ npm run job:scan-full
 npm run job:confirm
 npm run job:ingest
 npm run job:backfill
+npm run job:scrub-sensitive-content
 npm run job:migrate
 npm run job:cycle
 ```
@@ -79,6 +80,14 @@ Full-history scan controls (env):
 - `SCAN_FULL_MAX_RESULTS` default `0` (0 = no cap)
 - `SCAN_FULL_PAGE_SIZE` default `500`
 - `SCAN_FULL_QUERY` optional Gmail query override
+
+Inbox scan controls (env):
+- `SCAN_MAX_RESULTS` default `0` (0 = no cap; recommended for no-miss scanning)
+- `SCAN_PAGE_SIZE` default `500`
+- `SCAN_CURSOR_OVERLAP_SECONDS` default `300` (replay overlap to safely retry prior boundary/failure windows)
+- `GMAIL_DEBUG_LABEL_TARGET_EMAIL` default `victor.fire1980@gmail.com` (only messages touching this address receive BOA status labels in Gmail)
+
+Identity/enrichment controls (env):
 - `LINK_RESOLUTION_ENABLED` default `false`
 - `LINK_RESOLUTION_MAX_LINKS` default `5`
 - `LINK_RESOLUTION_TIMEOUT_MS` default `5000`
@@ -92,6 +101,13 @@ Backfill controls (env):
 - `BACKFILL_WITH_SCREENSHOTS` default `false`
 - `BACKFILL_FORCE_UPDATE` default `false`
 
+Sensitive-content scrub controls (env):
+- `SCRUB_SENSITIVE_DRY_RUN` default `false`
+- `SCRUB_SENSITIVE_EMAIL_BATCH_SIZE` default `200`
+- `SCRUB_SENSITIVE_LISTING_BATCH_SIZE` default `200`
+- `SCRUB_SENSITIVE_EMAIL_LIMIT` default `0` (0 = no cap)
+- `SCRUB_SENSITIVE_LISTING_LIMIT` default `0` (0 = no cap)
+
 ### 4) Run API server
 
 ```bash
@@ -104,7 +120,7 @@ npm start
 curl -X POST http://localhost:3000/api/agent/process-inbox \
   -H "x-api-key: $API_KEY" \
   -H "content-type: application/json" \
-  -d '{"hours":24,"maxResults":100}'
+  -d '{"hours":24,"maxResults":0}'
 
 curl -X POST http://localhost:3000/api/agent/process-confirmations \
   -H "x-api-key: $API_KEY" \
@@ -119,7 +135,7 @@ curl -X POST http://localhost:3000/api/agent/ingest-newsletters \
 curl -X POST http://localhost:3000/api/agent/run-simplified-cycle \
   -H "x-api-key: $API_KEY" \
   -H "content-type: application/json" \
-  -d '{"batchSize":10,"inboxHours":24,"maxInboxResults":100}'
+  -d '{"batchSize":10,"inboxHours":24,"maxInboxResults":0}'
 ```
 
 ## Artifacts
