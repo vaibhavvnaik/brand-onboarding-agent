@@ -99,7 +99,15 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
   let page;
   try {
     page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
-    await page.setContent(html, { waitUntil: 'networkidle', timeout: 30000 });
+    try {
+      await page.setContent(html, { waitUntil: 'networkidle', timeout: 30000 });
+    } catch (err) {
+      // Some large/complex newsletter HTML hangs networkidle forever.
+      // Fallback to a plain-text render so we still get a deterministic screenshot.
+      const fallbackHtml = `<html><body><pre style="white-space:pre-wrap;font-family:Arial,sans-serif;">${scrubSensitiveContent(message.bodyText || message.textBody || message.snippet || message.subject || '(empty email)')}</pre></body></html>`;
+      logger.warn(`[screenshot] setContent timeout for ${message.gmailMessageId}; using fallback text render`);
+      await page.setContent(fallbackHtml, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    }
 
     // Inject CSS to force email content to fill the viewport width.
     // Email HTML uses fixed-width tables; overriding them makes the
@@ -551,7 +559,7 @@ async function markMessageIngestRetryPending({ message, reason = 'screenshot_mis
     at: new Date(),
     version,
     attempts: (message.processedBy?.ingestion_runner?.attempts || 0) + 1,
-    status: 'retry_pending',
+    status: 'skipped',
     lastProcessedAt: new Date(),
     error: reason
   };
