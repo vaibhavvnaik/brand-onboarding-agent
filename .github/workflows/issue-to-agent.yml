@@ -12,8 +12,8 @@ permissions:
   issues: write     # label, comment, assign
 
 jobs:
-  triage-and-launch:
-    name: Triage → Branch → Assign Agent
+  branch-and-assign:
+    name: Label → Branch → Assign Claude
     runs-on: ubuntu-latest
 
     # Safety: never react to bots opening issues
@@ -24,80 +24,27 @@ jobs:
       github.actor != 'dependabot[bot]'
 
     steps:
-      # ── 1. Auto-label via Claude ────────────────────────────────────────
-      - name: Auto-triage labels with Claude
-        id: triage
+      # ── 1. Simple keyword-based labeling (no API cost) ─────────────
+      - name: Auto-label by keywords
+        id: label
         uses: actions/github-script@v7
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         with:
           script: |
-            const issue    = context.payload.issue;
-            const title    = issue.title  || '';
-            const body     = issue.body   || '';
+            const issue = context.payload.issue;
+            const text  = `${issue.title} ${issue.body || ''}`.toLowerCase();
 
-            // ── Call Claude to classify the issue ──────────────────────
-            const res = await fetch('https://api.anthropic.com/v1/messages', {
-              method: 'POST',
-              headers: {
-                'Content-Type':      'application/json',
-                'x-api-key':         process.env.ANTHROPIC_API_KEY,
-                'anthropic-version': '2023-06-01'
-              },
-              body: JSON.stringify({
-                model:      'claude-sonnet-4-20250514',
-                max_tokens: 300,
-                messages: [{
-                  role:    'user',
-                  content: `You are a technical project manager triaging GitHub issues.
-            Classify the issue below and return ONLY valid JSON — no markdown, no preamble.
+            // ── Detect issue type from keywords ──
+            let typeLabel = 'task';
+            if (/\b(bug|broken|crash|error|fail|fix|regression|not working)\b/.test(text))        typeLabel = 'bug';
+            else if (/\b(feat|feature|add|new|implement|create|build)\b/.test(text))               typeLabel = 'feature';
+            else if (/\b(enhance|improve|upgrade|update|better|optimize|perf)\b/.test(text))       typeLabel = 'enhancement';
+            else if (/\b(doc|docs|documentation|readme|comment|typo)\b/.test(text))                typeLabel = 'documentation';
+            else if (/\b(refactor|restructure|rewrite|cleanup|clean up|reorganize)\b/.test(text))  typeLabel = 'refactor';
+            else if (/\b(chore|ci|config|setup|infra|dependency|deps|bump)\b/.test(text))          typeLabel = 'chore';
 
-            Schema:
-            {
-              "type_label":  "bug" | "feature" | "enhancement" | "documentation" | "refactor" | "chore",
-              "priority":    "P0" | "P1" | "P2" | "P3",
-              "complexity":  "XS" | "S" | "M" | "L" | "XL",
-              "agent":       "claude" | "codex",
-              "summary":     "<one sentence explaining the task for the agent>"
-            }
-
-            Rules:
-            - P0 = production broken, P1 = high impact, P2 = normal, P3 = nice-to-have
-            - complexity: XS=trivial fix, S<<1hr, M=half-day, L=full day, XL=multi-day
-            - agent: prefer "claude" for architecture/refactors, "codex" for greenfield features
-
-            Issue title: ${title}
-            Issue body:
-            ${body.slice(0, 2000)}`
-                }]
-              })
-            });
-
-            const data   = await res.json();
-            const text   = data.content[0].text.replace(/```json|```/g, '').trim();
-            const parsed = JSON.parse(text);
-            core.setOutput('type_label', parsed.type_label);
-            core.setOutput('priority',   parsed.priority);
-            core.setOutput('complexity', parsed.complexity);
-            core.setOutput('agent',      parsed.agent);
-            core.setOutput('summary',    parsed.summary);
-            console.log('Triage result:', JSON.stringify(parsed, null, 2));
-
-      # ── 2. Apply labels (creates them if missing) ───────────────────────
-      - name: Apply labels
-        uses: actions/github-script@v7
-        env:
-          TYPE_LABEL: ${{ steps.triage.outputs.type_label }}
-          PRIORITY:   ${{ steps.triage.outputs.priority }}
-          COMPLEXITY: ${{ steps.triage.outputs.complexity }}
-        with:
-          script: |
             const labelDefs = [
-              // [name, color, description]
-              [process.env.TYPE_LABEL, '0075ca', 'Issue type'],
-              [process.env.PRIORITY,   'd93f0b', 'Priority tier'],
-              [process.env.COMPLEXITY, '0e8a16', 'Story-point size'],
-              ['agent-assigned',       '6f42c1', 'Coding agent is working on this'],
+              [typeLabel,         '0075ca', 'Issue type'],
+              ['agent-assigned',  '6f42c1', 'Coding agent is working on this'],
             ];
 
             // Ensure every label exists in the repo
@@ -120,11 +67,14 @@ jobs:
             await github.rest.issues.addLabels({
               owner:        context.repo.owner,
               repo:         context.repo.repo,
-              issue_number: context.payload.issue.number,
+              issue_number: issue.number,
               labels:       labelDefs.map(([n]) => n)
             });
 
-      # ── 3. Create a dedicated branch ────────────────────────────────────
+            core.setOutput('type_label', typeLabel);
+            console.log(`Labelled as: ${typeLabel}`);
+
+      # ── 2. Create a dedicated branch ───────────────────────────────
       - name: Create feature branch
         id: branch
         uses: actions/github-script@v7
@@ -136,7 +86,7 @@ jobs:
               .replace(/[^a-z0-9\s]/g, '')
               .replace(/\s+/g, '-')
               .slice(0, 50)
-              .replace(/-+$/, '');   // trim trailing dashes
+              .replace(/-+$/, '');
 
             const branchName = `issue-${issue.number}/${slug}`;
 
@@ -163,31 +113,26 @@ jobs:
             core.setOutput('default_branch', repo.default_branch);
             console.log(`Branch created: ${branchName}`);
 
-      # ── 4. Assign the coding agent (claude or codex) ────────────────────
-      - name: Assign coding agent to issue
+      # ── 3. Assign Claude GitHub app to the issue ───────────────────
+      #    The Claude app (already installed) picks up the issue automatically
+      #    when assigned. No API key needed — it's handled by GitHub Agent HQ.
+      - name: Assign Claude agent to issue
         uses: actions/github-script@v7
-        env:
-          CHOSEN_AGENT: ${{ steps.triage.outputs.agent }}
         with:
           script: |
-            // GitHub Agent HQ: assigning 'claude' or 'codex' triggers their sessions
             await github.rest.issues.addAssignees({
               owner:        context.repo.owner,
               repo:         context.repo.repo,
               issue_number: context.payload.issue.number,
-              assignees:    [process.env.CHOSEN_AGENT]
+              assignees:    ['claude']
             });
-            console.log(`Assigned to: ${process.env.CHOSEN_AGENT}`);
+            console.log('Assigned to: claude');
 
-      # ── 5. Post a rich status comment on the issue ──────────────────────
+      # ── 4. Post a status comment on the issue ─────────────────────
       - name: Post pipeline status comment
         uses: actions/github-script@v7
         env:
-          TYPE_LABEL:  ${{ steps.triage.outputs.type_label }}
-          PRIORITY:    ${{ steps.triage.outputs.priority }}
-          COMPLEXITY:  ${{ steps.triage.outputs.complexity }}
-          AGENT:       ${{ steps.triage.outputs.agent }}
-          SUMMARY:     ${{ steps.triage.outputs.summary }}
+          TYPE_LABEL:  ${{ steps.label.outputs.type_label }}
           BRANCH_NAME: ${{ steps.branch.outputs.branch_name }}
           DEF_BRANCH:  ${{ steps.branch.outputs.default_branch }}
         with:
@@ -195,23 +140,17 @@ jobs:
             const issue      = context.payload.issue;
             const repoUrl    = `https://github.com/${context.repo.owner}/${context.repo.repo}`;
             const branchUrl  = `${repoUrl}/tree/${process.env.BRANCH_NAME}`;
-            const agentIcon  = process.env.AGENT === 'claude' ? '🤖 Claude' : '⚡ Codex';
 
             const body = `## 🚀 Issue Pipeline Activated
 
             | Field | Value |
             |-------|-------|
             | **Type** | \`${process.env.TYPE_LABEL}\` |
-            | **Priority** | \`${process.env.PRIORITY}\` |
-            | **Complexity** | \`${process.env.COMPLEXITY}\` |
-            | **Assigned Agent** | ${agentIcon} |
+            | **Assigned Agent** | 🤖 Claude |
             | **Branch** | [\`${process.env.BRANCH_NAME}\`](${branchUrl}) |
 
-            ### 🎯 Agent Brief
-            > ${process.env.SUMMARY}
-
             ### ⏭ What happens next
-            1. ${agentIcon} reads this issue and begins implementation on \`${process.env.BRANCH_NAME}\`
+            1. 🤖 Claude reads this issue and begins implementation on \`${process.env.BRANCH_NAME}\`
             2. Code is pushed → Vercel builds a preview deployment automatically
             3. A Vercel preview card will be posted here once deployed
             4. **You create the PR and merge when you're satisfied** — no auto-PR will be opened
@@ -223,5 +162,5 @@ jobs:
               owner:        context.repo.owner,
               repo:         context.repo.repo,
               issue_number: issue.number,
-              body:         body.replace(/^            /gm, '')   // strip indent
+              body:         body.replace(/^            /gm, '')
             });
