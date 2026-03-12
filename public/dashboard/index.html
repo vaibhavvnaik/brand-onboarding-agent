@@ -171,6 +171,38 @@
 <!-- -- OPERATIONS ------------------------------------------------- -->
 <div class="max-w-screen-2xl mx-auto px-6 pb-4">
   <div class="glass rounded-xl p-4 mb-4">
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-2">
+      <div>
+        <h3 class="text-sm font-semibold text-slate-200">Screenshot Repair</h3>
+        <p class="text-[11px] text-slate-500 mt-1">Retake broken or half-loaded listing screenshots using the production retake pipeline.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="retakeScreenshotsBtn" onclick="triggerRetakeScreenshots()" class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded transition-colors">
+          Retake Broken Screenshots
+        </button>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-2">
+      <label class="text-xs text-slate-400">
+        Batch Size
+        <input id="retakeBatchSize" type="number" min="25" max="500" value="200" class="mt-1 w-full bg-white/5 border border-white/10 rounded px-2 py-1.5 text-slate-200">
+      </label>
+      <label class="text-xs text-slate-400">
+        Max Batches
+        <input id="retakeMaxBatches" type="number" min="1" max="200" value="50" class="mt-1 w-full bg-white/5 border border-white/10 rounded px-2 py-1.5 text-slate-200">
+      </label>
+      <label class="text-xs text-slate-400">
+        Skip Already Retaken
+        <select id="retakeSkipAlready" class="mt-1 w-full bg-white/5 border border-white/10 rounded px-2 py-1.5 text-slate-200">
+          <option value="true" selected>true</option>
+          <option value="false">false</option>
+        </select>
+      </label>
+    </div>
+    <div id="retakeScreenshotsStatus" class="text-xs text-slate-400">No retake job started from dashboard in this session.</div>
+  </div>
+
+  <div class="glass rounded-xl p-4 mb-4">
     <div class="flex items-center justify-between mb-3">
       <div>
         <h3 class="text-sm font-semibold text-slate-200">Brand Workflow Matrix</h3>
@@ -622,6 +654,55 @@ function pollAgentStatus() {
       }
     } catch {}
   }, 5000);
+}
+
+async function triggerRetakeScreenshots() {
+  const btn = document.getElementById('retakeScreenshotsBtn');
+  const statusEl = document.getElementById('retakeScreenshotsStatus');
+  const batchSize = Math.max(25, Math.min(500, Number(document.getElementById('retakeBatchSize').value || 200)));
+  const maxBatches = Math.max(1, Math.min(200, Number(document.getElementById('retakeMaxBatches').value || 50)));
+  const skipAlreadyRetaken = String(document.getElementById('retakeSkipAlready').value) === 'true';
+
+  btn.disabled = true;
+  btn.classList.add('opacity-60', 'cursor-not-allowed');
+  statusEl.className = 'text-xs text-amber-300';
+  statusEl.textContent = `Starting retake job... batchSize=${batchSize}, maxBatches=${maxBatches}, skipAlreadyRetaken=${skipAlreadyRetaken}`;
+
+  try {
+    const res = await fetch('/api/agent/retake-screenshots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        limit: batchSize,
+        dryRun: false,
+        skipAlreadyRetaken,
+        untilExhausted: true,
+        batchSize,
+        maxBatches
+      })
+    });
+
+    if (res.status === 401) {
+      window.location.href = '/dashboard/login';
+      return;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || data.message || `Request failed (${res.status})`);
+    }
+
+    statusEl.className = 'text-xs text-emerald-300';
+    statusEl.textContent = `Retake started successfully at ${new Date().toLocaleTimeString()}. Check Workflow Step History and Railway logs for progress.`;
+    loadWorkflowRuns();
+    loadActivityLogs();
+  } catch (e) {
+    statusEl.className = 'text-xs text-red-300';
+    statusEl.textContent = `Retake start failed: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('opacity-60', 'cursor-not-allowed');
+  }
 }
 
 // -- Ops Panels ---------------------------------------------------
