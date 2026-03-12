@@ -141,3 +141,22 @@ curl -X POST http://localhost:3000/api/agent/run-simplified-cycle \
 ## Artifacts
 
 Screenshots are written to `artifacts/newsletters/`.
+
+## Production Hardening (Railway)
+
+To permanently avoid chronic Playwright shared-library failures (for example `libglib-2.0.so.0` missing), deploy using the included `Dockerfile` instead of relying on mutable runtime installs.
+
+- The `Dockerfile` installs Chromium and all required OS dependencies at build time via:
+  - `npx playwright install --with-deps chromium`
+- Runtime command stays `node boot.js`.
+
+Recommended Railway setup:
+
+1. Ensure Dockerfile builds are enabled for this repo/service.
+2. Keep `PLAYWRIGHT_PREFLIGHT_AUTO_INSTALL=false` in production.
+3. Keep exactly one scheduler instance enabled.
+  - Set `INTERNAL_CRON_ENABLED=true` only on the single service that should run the scheduler.
+  - Set `INTERNAL_CRON_ENABLED=false` on every other service (for example any legacy `web` service) to prevent duplicate/rogue runs.
+4. After deploy, verify:
+  - `GET /api/runtime/playwright-status` returns `ready: true`
+  - Latest `discover_and_signup` no longer fails with runtime/preflight errors.

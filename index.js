@@ -84,6 +84,8 @@ async function runStepWithTracking(step, options = {}) {
 
 function startInternalScheduler() {
   const enabled = (process.env.INTERNAL_CRON_ENABLED || 'true').toLowerCase() !== 'false';
+  const schedulerServiceName = String(process.env.INTERNAL_CRON_SERVICE_NAME || '').trim();
+  const currentServiceName = String(process.env.RAILWAY_SERVICE_NAME || process.env.SERVICE_NAME || '').trim();
   const intervalMin = Number(process.env.INTERNAL_CRON_INTERVAL_MIN || 10);
   const intervalMs = Math.max(1, intervalMin) * 60 * 1000;
   const initialDelaySec = Number(process.env.INTERNAL_CRON_INITIAL_DELAY_SEC || 30);
@@ -96,6 +98,11 @@ function startInternalScheduler() {
 
   if (!enabled) {
     logger.info('[scheduler] Internal scheduler disabled (INTERNAL_CRON_ENABLED=false)');
+    return;
+  }
+
+  if (schedulerServiceName && currentServiceName && schedulerServiceName !== currentServiceName) {
+    logger.info(`[scheduler] Internal scheduler disabled on this service (expected service="${schedulerServiceName}", current="${currentServiceName}")`);
     return;
   }
 
