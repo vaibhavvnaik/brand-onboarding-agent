@@ -95,71 +95,32 @@ async function screenshotEmailMessage(message) {
     const page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-    // Try to crop to the main email content column so previews are visually larger.
-    const clip = await page.evaluate((vw) => {
-      const doc = document.documentElement;
-      const body = document.body;
-      if (body) body.style.margin = '0';
-      if (doc) doc.style.margin = '0';
+    // Inject CSS to force email content to fill the viewport width.
+    // Email HTML uses fixed-width tables; overriding them makes the
+    // content stretch edge-to-edge so tile thumbnails have no side whitespace.
+    await page.evaluate(() => {
+      const style = document.createElement('style');
+      style.textContent = [
+        'html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; width: 100% !important; }',
+        'table { width: 100% !important; max-width: 100% !important; }',
+        'td { max-width: 100% !important; }',
+        'center { width: 100% !important; }',
+        'img { max-width: 100% !important; height: auto !important; }',
+        '.wrapper, .container, .email-body, .email-container { width: 100% !important; max-width: 100% !important; }'
+      ].join('\n');
+      document.head.appendChild(style);
+      // Remove fixed width attributes on tables and wide tds
+      document.querySelectorAll('table[width]').forEach(function(t) { t.removeAttribute('width'); });
+      document.querySelectorAll('td[width]').forEach(function(td) {
+        var w = parseInt(td.getAttribute('width'), 10);
+        if (w > 300) td.removeAttribute('width');
+      });
+    });
 
-      const centerX = vw / 2;
-      const maxWidth = Math.max(320, vw * 0.98);
-      const preferredWidth = 600;
-
-      const candidates = Array.from(document.querySelectorAll('table,main,article,section,div'))
-        .map((el) => {
-          const r = el.getBoundingClientRect();
-          const area = r.width * r.height;
-          if (!(r.width >= 300 && r.width <= maxWidth)) return null;
-          if (r.height < 500) return null;
-          if (!(r.bottom > 0 && r.right > 0)) return null;
-          if (area < 220000) return null;
-
-          const widthScore = 1 - Math.min(1, Math.abs(r.width - preferredWidth) / 450);
-          const centerScore = 1 - Math.min(1, Math.abs((r.left + r.width / 2) - centerX) / (vw / 2));
-          const topScore = 1 - Math.min(1, Math.max(0, r.top) / 900);
-          const areaScore = Math.min(1, area / 1200000);
-          const tallPenalty = r.width > (vw * 0.9) ? 0.35 : 0;
-          const score = (widthScore * 0.45) + (centerScore * 0.3) + (topScore * 0.15) + (areaScore * 0.1) - tallPenalty;
-
-          return { r, score };
-        })
-        .filter(Boolean);
-
-      if (!candidates.length) return null;
-
-      candidates.sort((a, b) => b.score - a.score);
-      const best = candidates[0]?.r;
-      if (!best || best.width < 280 || best.height < 400) return null;
-
-      const padX = 6;
-      const padY = 4;
-      const x = Math.max(0, Math.floor(best.left + padX));
-      const y = Math.max(0, Math.floor(Math.max(0, best.top + padY)));
-      const width = Math.max(320, Math.floor(Math.min(vw - x, best.width - (padX * 2))));
-      const height = Math.max(700, Math.floor(best.height - (padY * 2)));
-
-      return { x, y, width, height };
-    }, viewportWidth);
-
-    if (clip) {
-      try {
-        await page.screenshot({
-          path: filePath,
-          clip: {
-            x: clip.x,
-            y: clip.y,
-            width: clip.width,
-            height: clip.height
-          }
-        });
-      } catch (err) {
-        // Some templates produce invalid clip bounds after dynamic layout; fallback safely.
-        await page.screenshot({ path: filePath, fullPage: true });
-      }
-    } else {
-      await page.screenshot({ path: filePath, fullPage: true });
-    }
+    // Take a viewport-sized screenshot (not fullPage) so the image
+    // is exactly viewportWidth x viewportHeight (600x1200 by default).
+    // This avoids super-tall images that look tiny in listing tiles.
+    await page.screenshot({ path: filePath });
     return filePath;
   } finally {
     await browser.close().catch(() => {});
