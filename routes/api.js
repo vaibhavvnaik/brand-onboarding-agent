@@ -15,7 +15,7 @@ const { ensureBrandLogo } = require('../services/brandLogo');
 const { scanRecentEmails } = require('../services/emailChangeDetector');
 const { processInbox } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
-const { ingestPendingNewsletters, backfillListingsFromEmailMessages } = require('../services/newsletterIngestor');
+const { ingestPendingNewsletters, backfillListingsFromEmailMessages, retakeListingScreenshots } = require('../services/newsletterIngestor');
 const { runJob } = require('../jobs/runJob');
 const logger = require('../utils/logger');
 const ActivityLog = require('../models/ActivityLog');
@@ -940,6 +940,19 @@ router.post('/agent/backfill-screenshots', async (req, res) => {
     res.json({ message: 'Backfill started', options: { limit, withScreenshots, forceUpdate, forceScreenshotRetake } });
     backfillListingsFromEmailMessages({ limit, withScreenshots, forceUpdate, forceScreenshotRetake }).catch(err => {
       console.error('[backfill-screenshots] error:', err.message);
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+router.post('/agent/retake-screenshots', async (req, res) => {
+  try {
+    const { limit = 100, dryRun = false, skipAlreadyRetaken = true } = req.body || {};
+    res.json({ message: 'Retake started', options: { limit, dryRun, skipAlreadyRetaken } });
+    retakeListingScreenshots({ limit, dryRun, skipAlreadyRetaken }).catch(err => {
+      console.error('[retake-screenshots] error:', err.message);
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
