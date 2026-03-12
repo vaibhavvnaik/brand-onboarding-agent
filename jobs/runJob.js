@@ -4,7 +4,7 @@ const { connectDB } = require('../config/database');
 const { run } = require('../agents/brandOnboardingAgent');
 const { processInbox, processInboxFullHistory } = require('../services/inboxProcessor');
 const { processPendingConfirmations } = require('../services/confirmationProcessor');
-const { ingestPendingNewsletters, backfillListingsFromEmailMessages } = require('../services/newsletterIngestor');
+const { ingestPendingNewsletters, backfillListingsFromEmailMessages, retakeListingScreenshots } = require('../services/newsletterIngestor');
 const { runLinkLegacyListingsToEmails } = require('./linkLegacyListingsToEmails');
 
 async function runJob(job, options = {}) {
@@ -50,6 +50,12 @@ async function runJob(job, options = {}) {
         minAmbiguousThreshold: Number(options.minAmbiguousThreshold || process.env.LINK_LEGACY_AMBIGUOUS_THRESHOLD || 0.6),
         ambiguousGap: Number(options.ambiguousGap || process.env.LINK_LEGACY_AMBIGUOUS_GAP || 0.15),
         dryRun: String(options.dryRun ?? process.env.LINK_LEGACY_DRY_RUN ?? 'false') === 'true'
+      });
+    case 'retake_screenshots':
+      return retakeListingScreenshots({
+        limit: Number(options.limit || 100),
+        dryRun: String(options.dryRun ?? 'false') === 'true',
+        skipAlreadyRetaken: String(options.skipAlreadyRetaken ?? 'true') === 'true'
       });
     default:
       throw new Error(`Unknown job: ${job}`);
