@@ -78,6 +78,22 @@ function extractDiscountText(subject = '') {
   return match[1];
 }
 
+function readNumberEnv(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+function readBoolEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
+
+function defaultScreenshotUserAgent() {
+  return process.env.NEWSLETTER_SCREENSHOT_USER_AGENT ||
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+}
+
 async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
   ensureOutputDir();
   const safeId = String(message.gmailMessageId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -90,17 +106,34 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || undefined;
   const viewportWidth = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_WIDTH || 600);
   const viewportHeight = Number(process.env.NEWSLETTER_SCREENSHOT_VIEWPORT_HEIGHT || 1200);
+  const stabilizeMs = readNumberEnv('NEWSLETTER_SCREENSHOT_STABILIZE_MS', 6000);
+  const maxImgWaitMs = readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_IMAGE_WAIT_MS', 12000);
+  const maxCaptureHeight = readNumberEnv('NEWSLETTER_SCREENSHOT_MAX_CAPTURE_HEIGHT', 2200);
+  const forceWidthRewrite = readBoolEnv('NEWSLETTER_SCREENSHOT_FORCE_WIDTH_REWRITE', false);
+  const minImageLoadRatio = Number(process.env.NEWSLETTER_SCREENSHOT_MIN_IMAGE_LOAD_RATIO || 0.35);
   const ownBrowser = !sharedBrowser;
   const browser = sharedBrowser || await chromium.launch({
     headless: true,
     executablePath,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
+  let context;
   let page;
   try {
-    page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
+    context = await browser.newContext({
+      viewport: { width: viewportWidth, height: viewportHeight },
+      userAgent: defaultScreenshotUserAgent(),
+      locale: 'en-US'
+    });
+    page = await context.newPage();
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      Referer: 'https://mail.google.com/',
+      'Upgrade-Insecure-Requests': '1'
+    });
     try {
-      await page.setContent(html, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     } catch (err) {
       // Some large/complex newsletter HTML hangs networkidle forever.
       // Fallback to a plain-text render so we still get a deterministic screenshot.
@@ -109,52 +142,65 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
       await page.setContent(fallbackHtml, { waitUntil: 'domcontentloaded', timeout: 15000 });
     }
 
-    // Inject CSS to force email content to fill the viewport width.
-    // Email HTML uses fixed-width tables; overriding them makes the
-    // content stretch edge-to-edge so tile thumbnails have no side whitespace.
+    // Improve compatibility with email templates that lazy-load or rely on
+    // `data-src` style image attributes.
     await page.evaluate(() => {
-      const style = document.createElement('style');
-      style.textContent = [
-        'html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; width: 100% !important; }',
-        'table { width: 100% !important; max-width: 100% !important; }',
-        'td { max-width: 100% !important; }',
-        'center { width: 100% !important; }',
-        'img { max-width: 100% !important; height: auto !important; }',
-        '.wrapper, .container, .email-body, .email-container { width: 100% !important; max-width: 100% !important; }'
-      ].join('\n');
-      document.head.appendChild(style);
-      // Remove fixed width attributes on tables and wide tds
-      document.querySelectorAll('table[width]').forEach(function(t) { t.removeAttribute('width'); });
-      document.querySelectorAll('td[width]').forEach(function(td) {
-        var w = parseInt(td.getAttribute('width'), 10);
-        if (w > 300) td.removeAttribute('width');
+      const imgSelectors = ['img[data-src]', 'img[data-original]', 'img[data-lazy-src]'];
+      imgSelectors.forEach((sel) => {
+        document.querySelectorAll(sel).forEach((img) => {
+          const src = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src');
+          if (src && !img.getAttribute('src')) img.setAttribute('src', src);
+        });
+      });
+      document.querySelectorAll('img[loading="lazy"]').forEach((img) => {
+        img.setAttribute('loading', 'eager');
       });
     });
 
-    // CSS injection causes reflow which may trigger new network requests
-    // (e.g. newly-visible images, background images). Wait for network to settle again.
+    if (forceWidthRewrite) {
+      // Optional width rewrite for templates that render as narrow centered strips.
+      // Disabled by default because it can break some brand layouts.
+      await page.evaluate(() => {
+        const style = document.createElement('style');
+        style.textContent = [
+          'html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; width: 100% !important; }',
+          'table { width: 100% !important; max-width: 100% !important; }',
+          'td { max-width: 100% !important; }',
+          'center { width: 100% !important; }',
+          'img { max-width: 100% !important; height: auto !important; }',
+          '.wrapper, .container, .email-body, .email-container { width: 100% !important; max-width: 100% !important; }'
+        ].join('\n');
+        document.head.appendChild(style);
+        document.querySelectorAll('table[width]').forEach((t) => t.removeAttribute('width'));
+        document.querySelectorAll('td[width]').forEach((td) => {
+          const w = parseInt(td.getAttribute('width'), 10);
+          if (w > 300) td.removeAttribute('width');
+        });
+      });
+    }
+
     await page.waitForLoadState('networkidle').catch(() => {});
 
-    // Wait for all <img> elements to finish loading so the screenshot captures
-    // the fully-rendered newsletter, not a partially-loaded blank page.
-    await page.evaluate(() => {
+    // Wait for image decode/load best effort.
+    await page.evaluate((maxWait) => {
       return Promise.all(
-        Array.from(document.querySelectorAll('img')).map(img => {
+        Array.from(document.querySelectorAll('img')).map((img) => {
           if (img.complete && img.naturalWidth > 0) return Promise.resolve();
-          return new Promise((resolve) => {
-            img.addEventListener('load', resolve, { once: true });
-            img.addEventListener('error', resolve, { once: true });
-            setTimeout(resolve, 8000);
-          });
+          return Promise.race([
+            new Promise((resolve) => {
+              img.addEventListener('load', resolve, { once: true });
+              img.addEventListener('error', resolve, { once: true });
+            }),
+            new Promise((resolve) => setTimeout(resolve, maxWait))
+          ]);
         })
       );
-    });
+    }, maxImgWaitMs);
 
-    // Wait for CSS background images to load (many newsletters use background-image for hero banners)
-    await page.evaluate(() => {
+    await page.evaluate((maxWait) => {
       const bgElements = [];
       const allElements = document.querySelectorAll('*');
-      for (let i = 0; i < allElements.length; i++) {
+      for (let i = 0; i < allElements.length; i += 1) {
         const style = window.getComputedStyle(allElements[i]);
         const bgImage = style.backgroundImage;
         if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
@@ -163,18 +209,19 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
         }
       }
       if (bgElements.length === 0) return Promise.resolve();
-      return Promise.all(bgElements.map(url => {
-        return new Promise((resolve) => {
-          const img = new Image();
-          img.onload = resolve;
-          img.onerror = resolve;
-          setTimeout(resolve, 8000);
-          img.src = url;
-        });
+      return Promise.all(bgElements.map((url) => {
+        return Promise.race([
+          new Promise((resolve) => {
+            const img = new Image();
+            img.onload = resolve;
+            img.onerror = resolve;
+            img.src = url;
+          }),
+          new Promise((resolve) => setTimeout(resolve, maxWait))
+        ]);
       }));
-    });
+    }, maxImgWaitMs);
 
-    // Wait for web fonts to finish loading (prevents fallback font flash)
     await page.evaluate(() => {
       if (document.fonts && document.fonts.ready) {
         return document.fonts.ready;
@@ -182,14 +229,68 @@ async function screenshotEmailMessage(message, { sharedBrowser } = {}) {
       return Promise.resolve();
     }).catch(() => {});
 
-    // Stabilization delay for CSS reflows, font swaps, and late-rendering content.
-    // 2000ms was still too short for many newsletters — increase to 5000ms.
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(stabilizeMs);
 
-    await page.screenshot({ path: filePath });
+    const quality = await page.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      const loaded = imgs.filter((img) => img.complete && img.naturalWidth > 0).length;
+      let maxBottom = 0;
+      const nodes = Array.from(document.querySelectorAll('body *'));
+      for (const node of nodes) {
+        const rect = node.getBoundingClientRect();
+        if (!rect || rect.height <= 0 || rect.width <= 0) continue;
+        const text = (node.textContent || '').trim();
+        const hasText = text.length > 20;
+        const hasMedia = node.tagName === 'IMG';
+        if (hasText || hasMedia) {
+          maxBottom = Math.max(maxBottom, node.offsetTop + rect.height);
+        }
+      }
+      const body = document.body;
+      const doc = document.documentElement;
+      const scrollHeight = Math.max(
+        body ? body.scrollHeight : 0,
+        doc ? doc.scrollHeight : 0,
+        body ? body.offsetHeight : 0,
+        doc ? doc.offsetHeight : 0
+      );
+      return {
+        imgTotal: imgs.length,
+        imgLoaded: loaded,
+        scrollHeight,
+        meaningfulBottom: Math.ceil(maxBottom)
+      };
+    });
+
+    const imgRatio = quality.imgTotal > 0 ? (quality.imgLoaded / quality.imgTotal) : 1;
+    if (quality.imgTotal >= 8 && imgRatio < minImageLoadRatio) {
+      logger.warn(`[screenshot] Low image-load ratio for ${message.gmailMessageId}: loaded=${quality.imgLoaded}/${quality.imgTotal}`);
+    }
+
+    const desiredHeight = Math.min(
+      maxCaptureHeight,
+      Math.max(
+        380,
+        Math.min(
+          quality.scrollHeight || viewportHeight,
+          (quality.meaningfulBottom || viewportHeight) + 24
+        )
+      )
+    );
+
+    await page.screenshot({
+      path: filePath,
+      clip: {
+        x: 0,
+        y: 0,
+        width: viewportWidth,
+        height: desiredHeight
+      }
+    });
     return filePath;
   } finally {
     if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
     if (ownBrowser) await browser.close().catch(() => {});
   }
 }
