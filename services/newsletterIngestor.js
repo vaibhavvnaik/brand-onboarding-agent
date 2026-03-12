@@ -95,7 +95,7 @@ async function screenshotEmailMessage(message) {
   });
   try {
     const page = await browser.newPage({ viewport: { width: viewportWidth, height: viewportHeight } });
-    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.setContent(html, { waitUntil: 'networkidle', timeout: 30000 });
 
     // Inject CSS to force email content to fill the viewport width.
     // Email HTML uses fixed-width tables; overriding them makes the
@@ -122,6 +122,24 @@ async function screenshotEmailMessage(message) {
     // Take a viewport-sized screenshot (not fullPage) so the image
     // is exactly viewportWidth x viewportHeight (600x1200 by default).
     // This avoids super-tall images that look tiny in listing tiles.
+    // Wait for all images to finish loading so the screenshot captures
+    // the fully-rendered newsletter, not a partially-loaded blank page.
+    await page.evaluate(() => {
+      return Promise.all(
+        Array.from(document.querySelectorAll('img')).map(img => {
+          if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+          return new Promise((resolve) => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+            setTimeout(resolve, 8000);
+          });
+        })
+      );
+    });
+
+    // Small stabilization delay for any CSS reflows after images load.
+    await page.waitForTimeout(500);
+
     await page.screenshot({ path: filePath });
     return filePath;
   } finally {
