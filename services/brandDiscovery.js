@@ -30,6 +30,24 @@ function normalizeDomain(domain = '') {
   return String(domain).toLowerCase().trim().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
 }
 
+const DEFAULT_DISCOVERY_EXCLUDED_DOMAINS = [
+  // Known low-conversion or anti-bot heavy mega brands; keep discovery focused on sign-up friendly D2C sites.
+  'apple.com',
+  'tesla.com',
+  'nike.com',
+  'dyson.com',
+  'rimowa.com',
+  'chrono24.com'
+];
+
+function getDiscoveryExcludedDomains() {
+  const envRaw = String(process.env.DISCOVERY_EXCLUDE_DOMAINS || '').trim();
+  const envDomains = envRaw
+    ? envRaw.split(',').map((value) => normalizeDomain(value)).filter(Boolean)
+    : [];
+  return new Set([...DEFAULT_DISCOVERY_EXCLUDED_DOMAINS, ...envDomains]);
+}
+
 function tierToScore(tier = '') {
   const t = String(tier).toLowerCase();
   if (t === 'luxury') return { quality: 9, affiliate: 8 };
@@ -198,7 +216,8 @@ async function discoverBrandsWithLlm(limit, existingDomains = new Set(), options
     : [];
   const blocked = new Set([
     ...Array.from(existingDomains || []).map((d) => normalizeDomain(d)),
-    ...history.map((d) => normalizeDomain(d))
+    ...history.map((d) => normalizeDomain(d)),
+    ...Array.from(getDiscoveryExcludedDomains())
   ]);
 
   const avoidListMax = Math.max(20, parseInt(process.env.DISCOVERY_AVOID_LIST_MAX || '60', 10));
@@ -533,9 +552,12 @@ function scoreBrand(brand) {
 async function discoverBrands(limit = 20, existingDomains = new Set()) {
   logger.info(`\n Starting brand discovery - target: ${limit} brands`);
   const discovered = new Map(); // domain -> brand object, to deduplicate
+  const excludedDomains = getDiscoveryExcludedDomains();
   const discoverySourceRaw = String(process.env.DISCOVERY_SOURCE || 'ollama').toLowerCase();
   const discoverySource = discoverySourceRaw === 'claude' ? 'ollama' : discoverySourceRaw;
   const strictLlm = String(process.env.DISCOVERY_STRICT_LLM || process.env.DISCOVERY_STRICT_CLAUDE || 'false').toLowerCase() === 'true';
+  const forceLlmPath = envFlag('DISCOVERY_FORCE_LLM_PATH', true);
+  const allowLegacyFallback = envFlag('DISCOVERY_ALLOW_LEGACY_FALLBACK', false);
   const poolEnabled = envFlag('DISCOVERY_POOL_ENABLED', true);
   const poolTargetSize = Math.max(100, parseInt(process.env.DISCOVERY_POOL_TARGET_SIZE || '1000', 10));
   const poolFillChunkSize = Math.max(10, parseInt(process.env.DISCOVERY_POOL_FILL_BATCH || '12', 10));
@@ -544,24 +566,26 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
   const poolRefillOnExhaust = envFlag('DISCOVERY_POOL_REFILL_ON_EXHAUST', true);
   const poolRefillBurstMaxCalls = Math.max(1, parseInt(process.env.DISCOVERY_POOL_REFILL_BURST_MAX_CALLS || '120', 10));
   const poolHighQualityOnly = envFlag('DISCOVERY_POOL_HIGH_QUALITY_ONLY', true);
-  const enableMilled = envFlag('DISCOVERY_ENABLE_MILLED', false);
-  const milledMaxQueries = Math.max(1, parseInt(process.env.DISCOVERY_MILLED_MAX_QUERIES || '15', 10));
-  const milledStopOn403 = envFlag('DISCOVERY_MILLED_STOP_ON_403', true);
   const llmConfigured = isLlmAvailable();
-  const useLlm = !['legacy', 'milled_only'].includes(discoverySource);
-  const allowFallback = discoverySource !== 'ollama_only' || !strictLlm;
+  const sourceRequestsLegacy = ['legacy', 'milled_only'].includes(discoverySource);
+  const useLlm = forceLlmPath ? true : !sourceRequestsLegacy;
+  const allowFallback = allowLegacyFallback && (discoverySource !== 'ollama_only' || !strictLlm);
+
+  if (forceLlmPath && sourceRequestsLegacy) {
+    logger.warn(`[discovery] DISCOVERY_SOURCE=${discoverySource} ignored because DISCOVERY_FORCE_LLM_PATH=true`);
+  }
 
   if (useLlm) {
     if (!llmConfigured) {
       logger.warn('[discovery] LLM not configured; using fallback discovery sources');
     }
-    if (poolEnabled && llmConfigured) {
+    if (poolEnabled) {
       const initialPoolStats = await getDiscoveryPoolStats(existingDomains);
       const needsExhaustRefill = poolRefillOnExhaust && initialPoolStats.available < limit;
       const belowThreshold = initialPoolStats.available < poolRefillThreshold;
       const shouldRefill = needsExhaustRefill || belowThreshold;
 
-      if (shouldRefill) {
+      if (shouldRefill && llmConfigured) {
         const refillTarget = needsExhaustRefill
           ? Math.max(poolTargetSize, initialPoolStats.available + 1000)
           : poolTargetSize;
@@ -579,6 +603,8 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
           highQualityOnly: poolHighQualityOnly
         });
         logger.info(`[discovery_pool] queued=${fillStats.queued} available=${fillStats.available} target=${fillStats.targetSize} calls=${fillStats.calls} generated=${fillStats.generated} exhaust_refill=${needsExhaustRefill}`);
+      } else if (shouldRefill) {
+        logger.warn('[discovery_pool] refill skipped: llm not configured');
       } else {
         logger.info(`[discovery_pool] skip_refill=true available=${initialPoolStats.available} threshold=${poolRefillThreshold} limit=${limit}`);
       }
@@ -586,7 +612,7 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
       const pooled = await fetchFromDiscoveryPool(limit, existingDomains);
       for (const brand of pooled) {
         const cleanDomain = normalizeDomain(brand.domain);
-        if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+        if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain) || excludedDomains.has(cleanDomain)) continue;
         discovered.set(cleanDomain, brand);
       }
     }
@@ -599,7 +625,7 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
       });
       for (const brand of llmBrands) {
         const cleanDomain = normalizeDomain(brand.domain);
-        if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
+        if (!cleanDomain || existingDomains.has(cleanDomain) || discovered.has(cleanDomain) || excludedDomains.has(cleanDomain)) continue;
         discovered.set(cleanDomain, brand);
       }
       if (poolEnabled && llmBrands.length) {
@@ -619,11 +645,18 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
     }
   }
 
+  if (!allowFallback) {
+    logger.warn('[discovery] Legacy fallback disabled; returning only LLM/pool results');
+    const result = Array.from(discovered.values()).slice(0, limit);
+    logger.info(`[OK] Discovery complete (no-fallback): returning ${result.length} brands`);
+    return result;
+  }
+
   // -- 1. Start with curated seed brands ------------------------
   logger.info('Loading curated seed brands...');
   for (const brand of SEED_BRANDS) {
     const cleanDomain = brand.domain.replace(/^www\./, '').toLowerCase();
-    if (!existingDomains.has(cleanDomain) && !discovered.has(cleanDomain)) {
+    if (!existingDomains.has(cleanDomain) && !discovered.has(cleanDomain) && !excludedDomains.has(cleanDomain)) {
       discovered.set(cleanDomain, {
         ...brand,
         websiteUrl: `https://www.${brand.domain}`,
@@ -636,70 +669,8 @@ async function discoverBrands(limit = 20, existingDomains = new Set()) {
     }
   }
   logger.info(`Loaded ${discovered.size} seed brands`);
-
-  // -- 2. Optionally scrape milled.com by category --------------
-  // Disabled by default because Milled often returns 403 from cloud hosts.
-  if (enableMilled) {
-    const sortedTerms = [...MILLED_SEARCH_TERMS].sort((a, b) => a.priority - b.priority).slice(0, milledMaxQueries);
-    let milledBlocked = false;
-
-    for (const { category, query } of sortedTerms) {
-      if (discovered.size >= limit * 3) break;
-      if (milledBlocked) break;
-
-      try {
-        const { brands: milledBrands, blockedBy403 } = await scrapeMilledSearch(query, 20);
-        if (blockedBy403 && milledStopOn403) {
-          milledBlocked = true;
-          logger.warn('[discovery] Stopping Milled scraping for this run after HTTP 403 block.');
-          continue;
-        }
-
-        await sleep(1500); // Be polite to milled.com
-
-        for (const brand of milledBrands) {
-          if (!brand.name) continue;
-
-          // If we got a milled slug, try to get the actual domain
-          let domain = brand.domain;
-          if (!domain && brand.milledSlug) {
-            const detail = await scrapeMilledBrandPage(brand.milledSlug);
-            await sleep(800);
-            if (detail.domain) {
-              domain = detail.domain;
-              Object.assign(brand, detail);
-            }
-          }
-
-          if (!domain) domain = brand.milledSlug + '.com'; // Best guess
-
-          const cleanDomain = domain.replace(/^www\./, '').toLowerCase();
-          if (existingDomains.has(cleanDomain) || discovered.has(cleanDomain)) continue;
-
-          // Basic quality filter
-          const qualityScore = scoreBrand({ ...brand, category });
-          if (qualityScore < 4) continue;
-
-          discovered.set(cleanDomain, {
-            name:         brand.name,
-            domain:       cleanDomain,
-            websiteUrl:   brand.websiteUrl || `https://www.${cleanDomain}`,
-            description:  brand.description || '',
-            source:       'milled.com',
-            sourceUrl:    brand.sourceUrl,
-            milledFrequency:     brand.milledFrequency,
-            milledIndustrialTags: brand.milledIndustrialTags || [],
-            qualityScore,
-            affiliatePotentialScore: qualityScore >= 7 ? 7 : qualityScore >= 5 ? 5 : 4
-          });
-        }
-      } catch (err) {
-        logger.warn(`Category scrape failed for ${category}: ${err.message}`);
-      }
-    }
-  } else {
-    logger.info('[discovery] Milled scraping disabled (set DISCOVERY_ENABLE_MILLED=true to enable).');
-  }
+  // -- 2. Milled fallback intentionally disabled -----------------
+  logger.info('[discovery] Milled scraping fallback disabled by policy');
 
   // -- 3. Sort by quality score and return top N -----------------
   const all = Array.from(discovered.values());

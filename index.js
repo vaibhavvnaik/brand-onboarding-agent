@@ -36,9 +36,13 @@ const setupRoutes   = require('./routes/setup');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-let schedulerRunning = false;
+const schedulerStepState = new Map();
 
 async function runStepWithTracking(step, options = {}) {
+  if (schedulerStepState.get(step)) {
+    return { step, status: 'skipped', reason: 'already_running' };
+  }
+  schedulerStepState.set(step, true);
   const startedAt = new Date();
   let runRow = null;
   const runtimeMeta = {
@@ -79,6 +83,8 @@ async function runStepWithTracking(step, options = {}) {
       await runRow.save();
     }
     return { step, status: 'failed', error: err.message };
+  } finally {
+    schedulerStepState.set(step, false);
   }
 }
 
@@ -88,6 +94,8 @@ function startInternalScheduler() {
   const currentServiceName = String(process.env.RAILWAY_SERVICE_NAME || process.env.SERVICE_NAME || '').trim();
   const intervalMin = Number(process.env.INTERNAL_CRON_INTERVAL_MIN || 10);
   const intervalMs = Math.max(1, intervalMin) * 60 * 1000;
+  const maxCycleMin = Number(process.env.INTERNAL_CRON_MAX_CYCLE_MIN || 25);
+  const maxCycleMs = Math.max(intervalMs, Math.max(5, maxCycleMin) * 60 * 1000);
   const initialDelaySec = Number(process.env.INTERNAL_CRON_INITIAL_DELAY_SEC || 30);
   const options = {
     batchSize: Number(process.env.INTERNAL_CRON_BATCH_SIZE || process.env.BATCH_SIZE || 10),
@@ -96,6 +104,10 @@ function startInternalScheduler() {
     limit: Number(process.env.INTERNAL_CRON_STEP_LIMIT || 50),
     retryMissingScreenshotsLimit: Number(process.env.INTERNAL_CRON_RETRY_MISSING_SCREENSHOTS_LIMIT || 50)
   };
+  const discoverEveryCycles = Math.max(1, Number(process.env.INTERNAL_CRON_DISCOVER_EVERY_CYCLES || 1));
+  let cycleCount = 0;
+  let cycleInProgress = false;
+  let cycleStartedAt = null;
 
   if (!enabled) {
     logger.info('[scheduler] Internal scheduler disabled (INTERNAL_CRON_ENABLED=false)');
@@ -108,13 +120,21 @@ function startInternalScheduler() {
   }
 
   const tick = async () => {
-    if (schedulerRunning) {
-      logger.warn('[scheduler] Previous cycle still running; skipping this tick');
-      return;
+    if (cycleInProgress) {
+      const elapsedMs = cycleStartedAt ? Date.now() - cycleStartedAt.getTime() : 0;
+      if (elapsedMs < maxCycleMs) {
+        logger.warn('[scheduler] Previous cycle still running; skipping this tick');
+        return;
+      }
+      logger.error(`[scheduler] Previous cycle exceeded max duration (${Math.round(elapsedMs / 1000)}s); clearing scheduler lock`);
+      cycleInProgress = false;
+      cycleStartedAt = null;
     }
 
-    schedulerRunning = true;
+    cycleInProgress = true;
+    cycleCount += 1;
     const startedAt = new Date();
+    cycleStartedAt = startedAt;
     logger.info(`[scheduler] Starting internal cycle (every ${intervalMin} min)`);
     appendActivityLog({
       source: 'job',
@@ -126,7 +146,15 @@ function startInternalScheduler() {
 
     try {
       const results = [];
-      results.push(await runStepWithTracking('discover_and_signup', options));
+      if (cycleCount % discoverEveryCycles === 0) {
+        results.push(await runStepWithTracking('discover_and_signup', options));
+      } else {
+        results.push({
+          step: 'discover_and_signup',
+          status: 'skipped',
+          reason: `discover cadence (${discoverEveryCycles} cycles)`
+        });
+      }
       results.push(await runStepWithTracking('scan_inbox', options));
       results.push(await runStepWithTracking('process_confirmations', options));
       results.push(await runStepWithTracking('ingest_newsletters', options));
@@ -159,7 +187,8 @@ function startInternalScheduler() {
         meta: { startedAt }
       });
     } finally {
-      schedulerRunning = false;
+      cycleInProgress = false;
+      cycleStartedAt = null;
     }
   };
 
@@ -175,7 +204,7 @@ function logDiscoveryRuntimeConfig() {
   const hasLlmConfig = !!(process.env.OLLAMA_BASE_URL || process.env.LLM_BASE_URL);
   logger.info(`[discovery] source=${source} llm_config=${hasLlmConfig ? 'present' : 'missing'} strict_llm=${strictLlm}`);
   if (!hasLlmConfig && source !== 'legacy' && source !== 'milled_only') {
-    logger.warn('[discovery] LLM discovery not available (missing OLLAMA_BASE_URL/LLM_BASE_URL). Fallback sources will be used.');
+    logger.warn('[discovery] LLM discovery env missing (OLLAMA_BASE_URL/LLM_BASE_URL). Discovery pool remains available; fresh LLM generation may fail.');
   }
 }
 
