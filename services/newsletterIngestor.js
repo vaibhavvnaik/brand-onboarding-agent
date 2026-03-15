@@ -53,6 +53,57 @@ function formatBrandNameFromDomain(domain = '') {
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
+async function resolveOrCreateAgentBrandForIngest(message) {
+  const senderEmail = String(message?.fromEmail || '').trim().toLowerCase();
+  const senderDomain = extractDomainFromEmail(senderEmail);
+  const registrable = getRegistrableDomain(senderDomain) || senderDomain;
+  if (!registrable) return null;
+
+  const websiteCandidates = [`https://${registrable}`, `http://${registrable}`];
+  let brand = await Brand.findOne({
+    $or: [
+      { domain: registrable },
+      { websiteUrl: { $in: websiteCandidates } },
+      { currentSenderEmail: senderEmail || null },
+      { knownSenderEmails: senderEmail || null },
+      { knownSenderDomains: registrable }
+    ]
+  });
+
+  if (brand) return brand;
+
+  const now = new Date();
+  const name = formatBrandNameFromDomain(registrable);
+  brand = new Brand({
+    name,
+    domain: registrable,
+    websiteUrl: `https://${registrable}`,
+    source: 'manual',
+    discoveredAt: now,
+    onboardingStatus: 'active',
+    statusUpdatedAt: now,
+    statusHistory: [{ status: 'active', changedAt: now, note: 'Auto-created from ingest fallback' }],
+    currentSenderEmail: senderEmail || undefined,
+    primarySenderEmail: senderEmail || undefined,
+    currentSenderDomain: senderDomain || undefined,
+    primarySenderDomain: senderDomain || undefined,
+    knownSenderEmails: senderEmail ? [senderEmail] : [],
+    knownSenderDomains: [senderDomain, registrable].filter(Boolean),
+    firstNewsletterAt: message?.receivedAt || now,
+    lastNewsletterAt: message?.receivedAt || now,
+    subscriptionEmail: process.env.GMAIL_USER || undefined
+  });
+
+  try {
+    await brand.save();
+    logger.info(`[ingest_newsletters] Auto-created brand ${brand.name} (${brand.domain}) for ${message.gmailMessageId}`);
+    return brand;
+  } catch (err) {
+    if (err?.code !== 11000) throw err;
+    return Brand.findOne({ domain: registrable });
+  }
+}
+
 function extractPromoCodes(subject = '', body = '') {
   const text = `${subject || ''}\n${body || ''}`;
   const found = new Set();
@@ -793,7 +844,6 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
 
   const candidates = await EmailMessage.find({
     emailType: { $in: ['newsletter', 'welcome'] },
-    brandId: { $exists: true, $ne: null },
     $or: [
       { ingestedAt: { $exists: false } },
       { ingestedAt: null }
@@ -813,7 +863,14 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
 
   for (const message of candidates) {
     message.processedBy = message.processedBy || {};
-    if (!message.brandId) {
+    let brand = null;
+    if (message.brandId) {
+      brand = await Brand.findById(message.brandId);
+    }
+    if (!brand) {
+      brand = await resolveOrCreateAgentBrandForIngest(message);
+    }
+    if (!brand) {
       message.processedBy.ingestion_runner = {
         done: false,
         at: new Date(),
@@ -833,27 +890,11 @@ async function ingestPendingNewsletters({ limit = 50 } = {}) {
       stats.skipped += 1;
       continue;
     }
-
-    const brand = await Brand.findById(message.brandId);
-    if (!brand) {
-      message.processedBy.ingestion_runner = {
-        done: false,
-        at: new Date(),
-        version: 'v2',
-        attempts: (message.processedBy?.ingestion_runner?.attempts || 0) + 1,
-        status: 'error',
-        lastProcessedAt: new Date(),
-        error: 'Brand not found'
-      };
-      message.needsReview = true;
-      await message.save();
-      await markEmailActivity({
-        gmailMessageId: message.gmailMessageId,
-        activity: 'error',
-        emailMessage: message
-      });
-      stats.failed += 1;
-      continue;
+    if (!message.brandId || String(message.brandId) !== String(brand._id)) {
+      message.brandId = brand._id;
+      if (String(message.state || '') === 'brand_unresolved') {
+        message.state = 'brand_resolved';
+      }
     }
 
     try {

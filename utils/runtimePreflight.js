@@ -81,6 +81,17 @@ function isSharedLibError(err) {
   );
 }
 
+function isSpawnResourceError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return msg.includes('spawn') && (msg.includes('eagain') || msg.includes('resource temporarily unavailable'));
+}
+
+function killStalePlaywrightChromium() {
+  const cmd = 'pkill -f "chromium_headless_shell|chrome-headless-shell|playwright_chromiumdev_profile" || true';
+  logger.warn(`[runtime] Attempting Chromium cleanup: ${cmd}`);
+  execSync(cmd, { stdio: 'ignore', env: process.env });
+}
+
 async function launchSmokeTest() {
   const { chromium } = require('playwright');
   const browser = await chromium.launch({
@@ -125,6 +136,22 @@ async function ensurePlaywrightRuntimeReady({ autoInstall = true } = {}) {
         runtimeState.reason = 'ok';
         logger.info('[runtime] Playwright preflight passed (launch smoke test succeeded).');
       } catch (err) {
+        if (isSpawnResourceError(err)) {
+          try {
+            killStalePlaywrightChromium();
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await launchSmokeTest();
+            runtimeState.ready = true;
+            runtimeState.reason = 'ok';
+            logger.warn('[runtime] Playwright preflight recovered after Chromium cleanup.');
+            return runtimeState;
+          } catch (retryErr) {
+            runtimeState.ready = false;
+            runtimeState.reason = retryErr.message;
+            logger.error(`[runtime] Playwright preflight failed after cleanup retry: ${retryErr.message}`);
+            return runtimeState;
+          }
+        }
         if (installAllowed && isSharedLibError(err)) {
           try {
             tryInstallChromiumWithDeps();

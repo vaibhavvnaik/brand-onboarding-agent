@@ -38,11 +38,66 @@ const PORT = process.env.PORT || 3000;
 
 const schedulerStepState = new Map();
 
-async function runStepWithTracking(step, options = {}) {
-  if (schedulerStepState.get(step)) {
-    return { step, status: 'skipped', reason: 'already_running' };
+function readNumberEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function getStepTimeoutMs(step) {
+  const defaultMinutes = readNumberEnv('INTERNAL_CRON_STEP_TIMEOUT_MIN', 12);
+  const defaultMs = Math.max(1, defaultMinutes) * 60 * 1000;
+  const specificKey = `INTERNAL_CRON_STEP_TIMEOUT_MIN_${String(step || '').toUpperCase()}`;
+  const specificMinutes = readNumberEnv(specificKey, NaN);
+  if (Number.isFinite(specificMinutes) && specificMinutes > 0) {
+    return specificMinutes * 60 * 1000;
   }
-  schedulerStepState.set(step, true);
+  return defaultMs;
+}
+
+function getStepLockTtlMs() {
+  return Math.max(
+    getStepTimeoutMs('default') * 2,
+    readNumberEnv('INTERNAL_CRON_STEP_LOCK_TTL_MIN', 30) * 60 * 1000
+  );
+}
+
+async function recoverStaleRunningWorkflowRuns() {
+  const ttlMs = getStepLockTtlMs();
+  const staleBefore = new Date(Date.now() - ttlMs);
+  const result = await WorkflowRun.updateMany(
+    {
+      trigger: 'scheduler',
+      status: 'running',
+      startedAt: { $lt: staleBefore }
+    },
+    {
+      $set: {
+        status: 'failed',
+        error: `scheduler_step_stale_timeout:${Math.round(ttlMs / 60000)}m`,
+        completedAt: new Date(),
+        updatedAt: new Date()
+      }
+    }
+  );
+  const modified = Number(result?.modifiedCount || 0);
+  if (modified > 0) {
+    logger.warn(`[scheduler] Recovered ${modified} stale running workflow rows older than ${Math.round(ttlMs / 60000)}m`);
+  }
+  return modified;
+}
+
+async function runStepWithTracking(step, options = {}) {
+  const existingLock = schedulerStepState.get(step);
+  const lockTtlMs = getStepLockTtlMs();
+  if (existingLock?.locked) {
+    const ageMs = Date.now() - existingLock.startedAt.getTime();
+    if (ageMs <= lockTtlMs) {
+      return { step, status: 'skipped', reason: 'already_running' };
+    }
+    logger.error(`[scheduler] Clearing stale in-memory lock for ${step}; age=${Math.round(ageMs / 1000)}s`);
+  }
+
+  schedulerStepState.set(step, { locked: true, startedAt: new Date() });
   const startedAt = new Date();
   let runRow = null;
   const runtimeMeta = {
@@ -65,7 +120,15 @@ async function runStepWithTracking(step, options = {}) {
   }
 
   try {
-    const result = await runJob(step, options);
+    const timeoutMs = getStepTimeoutMs(step);
+    const result = await Promise.race([
+      runJob(step, options),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`scheduler_step_timeout:${step}:${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      })
+    ]);
     if (runRow) {
       runRow.status = 'success';
       runRow.completedAt = new Date();
@@ -84,7 +147,7 @@ async function runStepWithTracking(step, options = {}) {
     }
     return { step, status: 'failed', error: err.message };
   } finally {
-    schedulerStepState.set(step, false);
+    schedulerStepState.set(step, { locked: false, startedAt: null });
   }
 }
 
@@ -330,6 +393,9 @@ function createSessionMiddleware() {
     connectDB()
       .then(() => {
         logger.info('MongoDB connected successfully');
+        recoverStaleRunningWorkflowRuns().catch((err) => {
+          logger.warn(`[scheduler] Failed stale workflow recovery: ${err.message}`);
+        });
         logDiscoveryRuntimeConfig();
         ensurePlaywrightRuntimeReady().then((runtime) => {
           logger.info(`[runtime] Playwright ready=${runtime.ready} reason=${runtime.reason}`);
