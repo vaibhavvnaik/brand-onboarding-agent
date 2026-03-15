@@ -687,11 +687,14 @@ async function materializeListingForMessage({ message, brand, withScreenshots = 
   const b2Enabled = canUseB2();
   if (withScreenshots && !screenshotUrl && b2Enabled) {
     const maxAttempts = Math.max(1, readNumberEnv('NEWSLETTER_SCREENSHOT_INGEST_MAX_ATTEMPTS', 3));
+    const relaxedFinalAttempt = readBoolEnv('NEWSLETTER_SCREENSHOT_RELAXED_FINAL_ATTEMPT', true);
     for (let attempt = 1; attempt <= maxAttempts && !screenshotUrl; attempt += 1) {
       try {
         screenshotPath = await screenshotEmailMessage(message, {
           options: {
-            strictQualityGate: true,
+            // Keep strict quality for early attempts, then allow a final relaxed pass
+            // so a few image-starved templates don't stay permanently stuck.
+            strictQualityGate: !(relaxedFinalAttempt && attempt === maxAttempts),
             // Give retries more time and optional width rewrite fallback on final attempt.
             stabilizeMs: attempt === 1 ? undefined : 9000,
             retryStabilizeMs: attempt === 1 ? undefined : 7000,
